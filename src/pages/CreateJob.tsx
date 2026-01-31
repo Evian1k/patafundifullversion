@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { 
@@ -16,12 +16,37 @@ import {
   Sparkles,
   Car,
   PaintBucket,
-  CheckCircle
+  CheckCircle,
+  X,
+  Loader
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Header from "@/components/layout/Header";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+interface Service {
+  id: string;
+  name: string;
+  icon: React.ElementType;
+  color: string;
+}
+
+interface PhotoData {
+  file: File;
+  preview: string;
+}
+
+interface JobData {
+  service: string;
+  problem: string;
+  description: string;
+  urgency: string;
+  location: string;
+  latitude?: number;
+  longitude?: number;
+  photos: PhotoData[];
+}
 
 const services = [
   { id: "plumbing", name: "Plumbing", icon: Droplets, color: "from-blue-500 to-cyan-500" },
@@ -43,17 +68,22 @@ const urgencyOptions = [
 const CreateJob = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
-  const [jobData, setJobData] = useState({
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [jobData, setJobData] = useState<JobData>({
     service: searchParams.get("service") || "",
     problem: searchParams.get("problem") || "",
     description: "",
     urgency: "",
     location: "",
-    photos: [] as string[],
+    latitude: undefined,
+    longitude: undefined,
+    photos: [] as PhotoData[],
   });
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<{ id?: string; user_metadata?: { full_name?: string } } | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -67,19 +97,179 @@ const CreateJob = () => {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Get user's current location via GPS
+  const captureLocation = async () => {
+    if (!navigator.geolocation) {
+      toast.error("Geolocation not supported on this device");
+      return;
+    }
+
+    setGeoLoading(true);
+    try {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject);
+      });
+
+      const { latitude, longitude } = position.coords;
+      setJobData((prev) => ({
+        ...prev,
+        latitude,
+        longitude,
+      }));
+
+      // Reverse geocode to get address (optional - using basic coords format)
+      setJobData((prev) => ({
+        ...prev,
+        location: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
+      }));
+
+      toast.success("Location captured!");
+    } catch (error) {
+      toast.error("Could not capture location. Please enter manually.");
+    } finally {
+      setGeoLoading(false);
+    }
+  };
+
+  // Handle photo upload
+  const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+
+    setUploadingPhoto(true);
+    try {
+      for (let i = 0; i < Math.min(files.length, 5 - jobData.photos.length); i++) {
+        const file = files[i];
+
+        // Validate file type
+        if (!file.type.startsWith("image/")) {
+          toast.error("Only image files are allowed");
+          continue;
+        }
+
+        // Validate file size (max 5MB)
+        if (file.size > 5 * 1024 * 1024) {
+          toast.error(`File ${file.name} is too large (max 5MB)`);
+          continue;
+        }
+
+        // Create preview
+        const preview = URL.createObjectURL(file);
+
+        setJobData((prev) => ({
+          ...prev,
+          photos: [...prev.photos, { file, preview }],
+        }));
+      }
+
+      if (jobData.photos.length >= 5) {
+        toast.info("Maximum 5 photos allowed");
+      } else {
+        toast.success("Photo added!");
+      }
+    } catch (error) {
+      toast.error("Failed to add photo");
+    } finally {
+      setUploadingPhoto(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
+  // Remove photo
+  const removePhoto = (index: number) => {
+    const photo = jobData.photos[index];
+    URL.revokeObjectURL(photo.preview);
+    setJobData((prev) => ({
+      ...prev,
+      photos: prev.photos.filter((_, i) => i !== index),
+    }));
+  };
+
+  // Submit job to database
   const handleSubmit = async () => {
-    if (!user) {
+    if (!user?.id) {
       toast.error("Please sign in to create a job");
       navigate("/auth?mode=signup");
       return;
     }
 
+    // Validate required fields
+    if (!jobData.service || !jobData.description || !jobData.urgency || !jobData.location) {
+      toast.error("Please fill in all required fields");
+      return;
+    }
+
     setLoading(true);
-    // This will be implemented with database
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    toast.success("Job request submitted! Finding fundis...");
-    navigate("/dashboard");
-    setLoading(false);
+    try {
+      // Get service category ID
+      const { data: categories } = await supabase
+        .from("service_categories")
+        .select("id")
+        .eq("name", jobData.service)
+        .single();
+
+      const categoryId = categories?.id;
+
+      // Create job record
+      const { data: newJob, error: jobError } = await supabase
+        .from("jobs")
+        .insert({
+          customer_id: user.id,
+          title: `${jobData.service} - ${jobData.problem || "Service Request"}`,
+          description: jobData.description,
+          urgency: jobData.urgency,
+          location: jobData.location,
+          latitude: jobData.latitude,
+          longitude: jobData.longitude,
+          category_id: categoryId,
+          status: "pending",
+        })
+        .select()
+        .single();
+
+      if (jobError) throw jobError;
+      if (!newJob) throw new Error("Failed to create job");
+
+      // Upload photos if any
+      if (jobData.photos.length > 0) {
+        for (const photo of jobData.photos) {
+          const fileExt = photo.file.name.split(".").pop();
+          const fileName = `${newJob.id}/${Date.now()}_${Math.random()}.${fileExt}`;
+
+          const { error: uploadError } = await supabase.storage
+            .from("job_photos")
+            .upload(fileName, photo.file);
+
+          if (uploadError) {
+            console.error("Photo upload error:", uploadError);
+            continue;
+          }
+
+          // Get public URL
+          const { data: publicUrl } = supabase.storage
+            .from("job_photos")
+            .getPublicUrl(fileName);
+
+          // Save photo metadata to database
+          await supabase.from("job_photos").insert({
+            job_id: newJob.id,
+            photo_url: publicUrl.publicUrl,
+            photo_type: "before",
+            uploaded_by: user.id,
+          });
+        }
+      }
+
+      toast.success("Job request submitted! Finding fundis...");
+      navigate("/dashboard", { replace: true });
+    } catch (error) {
+      console.error("Job submission error:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to submit job");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const steps = [
@@ -208,16 +398,56 @@ const CreateJob = () => {
                     <label className="block text-sm font-medium text-foreground mb-2">
                       Add photos (optional)
                     </label>
-                    <div className="flex gap-3">
-                      <button className="flex-1 h-24 border-2 border-dashed border-border rounded-xl hover:border-primary/30 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground">
-                        <Camera className="w-6 h-6" />
-                        <span className="text-sm">Add Photo</span>
-                      </button>
-                      <button className="h-24 px-6 border-2 border-dashed border-border rounded-xl hover:border-primary/30 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground">
-                        <Mic className="w-6 h-6" />
-                        <span className="text-sm">Voice</span>
-                      </button>
-                    </div>
+
+                    {/* Photo Preview Grid */}
+                    {jobData.photos.length > 0 && (
+                      <div className="mb-4 grid grid-cols-2 gap-3 md:grid-cols-3">
+                        {jobData.photos.map((photo, index) => (
+                          <div key={index} className="relative aspect-square rounded-lg overflow-hidden border border-border">
+                            <img
+                              src={photo.preview}
+                              alt={`Preview ${index + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+                            <button
+                              onClick={() => removePhoto(index)}
+                              className="absolute top-2 right-2 p-1 bg-red-500/80 hover:bg-red-600 rounded-full text-white transition-colors"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {jobData.photos.length < 5 && (
+                      <div className="flex gap-3">
+                        <button
+                          onClick={() => fileInputRef.current?.click()}
+                          disabled={uploadingPhoto}
+                          className="flex-1 h-24 border-2 border-dashed border-border rounded-xl hover:border-primary/30 disabled:opacity-50 transition-colors flex flex-col items-center justify-center gap-2 text-muted-foreground hover:text-foreground"
+                        >
+                          {uploadingPhoto ? (
+                            <Loader className="w-6 h-6 animate-spin" />
+                          ) : (
+                            <Camera className="w-6 h-6" />
+                          )}
+                          <span className="text-sm">{uploadingPhoto ? "Uploading..." : "Add Photo"}</span>
+                        </button>
+                        <input
+                          ref={fileInputRef}
+                          type="file"
+                          multiple
+                          accept="image/*"
+                          onChange={handlePhotoUpload}
+                          className="hidden"
+                        />
+                      </div>
+                    )}
+
+                    <p className="text-xs text-muted-foreground mt-2">
+                      {jobData.photos.length}/5 photos • Max 5MB each
+                    </p>
                   </div>
                 </div>
               </div>
@@ -262,15 +492,40 @@ const CreateJob = () => {
                     <label className="block text-sm font-medium text-foreground mb-2">
                       Service Location
                     </label>
-                    <div className="relative">
-                      <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
-                      <input
-                        type="text"
-                        placeholder="Enter your address"
-                        value={jobData.location}
-                        onChange={(e) => setJobData({ ...jobData, location: e.target.value })}
-                        className="w-full h-12 pl-12 pr-4 bg-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
-                      />
+                    <div className="space-y-2">
+                      <div className="relative flex gap-2">
+                        <div className="relative flex-1">
+                          <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
+                          <input
+                            type="text"
+                            placeholder="Enter your address"
+                            value={jobData.location}
+                            onChange={(e) => setJobData({ ...jobData, location: e.target.value })}
+                            className="w-full h-12 pl-12 pr-4 bg-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
+                          />
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={captureLocation}
+                          disabled={geoLoading}
+                          className="px-4"
+                        >
+                          {geoLoading ? (
+                            <Loader className="w-4 h-4 animate-spin" />
+                          ) : (
+                            <>
+                              <MapPin className="w-4 h-4" />
+                              GPS
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                      {jobData.latitude && jobData.longitude && (
+                        <p className="text-xs text-muted-foreground">
+                          📍 Coordinates: {jobData.latitude.toFixed(4)}, {jobData.longitude.toFixed(4)}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

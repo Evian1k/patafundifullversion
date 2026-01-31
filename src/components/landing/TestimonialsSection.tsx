@@ -1,31 +1,48 @@
 import { motion } from "framer-motion";
 import { Star, Quote } from "lucide-react";
+import { useEffect, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
-const testimonials = [
-  {
-    name: "Sarah Kamau",
-    role: "Homeowner, Nairobi",
-    avatar: "SK",
-    rating: 5,
-    text: "Found a plumber within 10 minutes! He fixed my burst pipe and the payment was seamless. FundiHub is a game changer.",
-  },
-  {
-    name: "James Ochieng",
-    role: "Business Owner, Mombasa",
-    avatar: "JO",
-    rating: 5,
-    text: "We use FundiHub for all our office repairs. The fundis are always professional and the tracking feature gives us peace of mind.",
-  },
-  {
-    name: "Grace Mwangi",
-    role: "Property Manager, Kisumu",
-    avatar: "GM",
-    rating: 5,
-    text: "Managing 20+ properties is easier now. I can request multiple services at once and track everything from one dashboard.",
-  },
-];
+interface Testimonial {
+  name: string;
+  role: string;
+  avatar: string;
+  rating: number;
+  text: string;
+}
 
 const TestimonialsSection = () => {
+  const [testimonials, setTestimonials] = useState<Testimonial[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const fetchTestimonials = async () => {
+      try {
+        // TODO: Fetch testimonials from database
+        // This should query reviews table with ratings and comments
+        setLoading(false);
+      } catch (error) {
+        console.error("Error fetching testimonials:", error);
+        setLoading(false);
+      }
+    };
+
+    fetchTestimonials();
+  }, []);
+  if (loading) {
+    return (
+      <section className="py-24 bg-background">
+        <div className="container mx-auto px-4 text-center">
+          <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+        </div>
+      </section>
+    );
+  }
+
+  if (testimonials.length === 0) {
+    return null;
+  }
+
   return (
     <section className="py-24 bg-background">
       <div className="container mx-auto px-4">

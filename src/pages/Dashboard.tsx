@@ -11,16 +11,38 @@ import {
   LogOut,
   Settings,
   Wrench,
-  ChevronRight
+  ChevronRight,
+  AlertCircle
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+interface JobPhoto {
+  id: string;
+  photo_url: string;
+}
+
+interface JobData {
+  id: string;
+  title: string;
+  description: string;
+  service_category: { name: string } | null;
+  urgency: string;
+  location: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  job_photos?: JobPhoto[];
+}
+
 const Dashboard = () => {
   const navigate = useNavigate();
-  const [user, setUser] = useState<any>(null);
+  const [user, setUser] = useState<{ id?: string; user_metadata?: { full_name?: string } } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeJobs, setActiveJobs] = useState<JobData[]>([]);
+  const [recentJobs, setRecentJobs] = useState<JobData[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
 
   useEffect(() => {
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
@@ -28,6 +50,9 @@ const Dashboard = () => {
       setLoading(false);
       if (!session?.user) {
         navigate("/auth");
+      } else {
+        // Fetch jobs when user is available
+        fetchUserJobs(session.user.id);
       }
     });
 
@@ -36,11 +61,47 @@ const Dashboard = () => {
       setLoading(false);
       if (!session?.user) {
         navigate("/auth");
+      } else {
+        fetchUserJobs(session.user.id);
       }
     });
 
     return () => subscription.unsubscribe();
   }, [navigate]);
+
+  // Fetch user's jobs from database
+  const fetchUserJobs = async (userId: string) => {
+    setJobsLoading(true);
+    try {
+      // Fetch active jobs (pending, matching, accepted, in_progress)
+      const { data: active, error: activeError } = await supabase
+        .from("jobs")
+        .select("*, service_categories(name), job_photos(*)")
+        .eq("customer_id", userId)
+        .in("status", ["pending", "matching", "accepted", "in_progress"])
+        .order("created_at", { ascending: false });
+
+      if (activeError) throw activeError;
+      setActiveJobs(active || []);
+
+      // Fetch completed jobs
+      const { data: completed, error: completedError } = await supabase
+        .from("jobs")
+        .select("*, service_categories(name), job_photos(*)")
+        .eq("customer_id", userId)
+        .eq("status", "completed")
+        .order("completed_at", { ascending: false })
+        .limit(10);
+
+      if (completedError) throw completedError;
+      setRecentJobs(completed || []);
+    } catch (error) {
+      console.error("Error fetching jobs:", error);
+      toast.error("Failed to load jobs");
+    } finally {
+      setJobsLoading(false);
+    }
+  };
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -55,40 +116,6 @@ const Dashboard = () => {
       </div>
     );
   }
-
-  // Mock data for demonstration
-  const activeJobs = [
-    {
-      id: "1",
-      service: "Plumbing",
-      description: "Leaky faucet in kitchen",
-      status: "in_progress",
-      fundi: {
-        name: "John Mwangi",
-        rating: 4.9,
-        eta: "15 min",
-      },
-    },
-  ];
-
-  const recentJobs = [
-    {
-      id: "2",
-      service: "Electrical",
-      description: "Socket installation",
-      status: "completed",
-      date: "Jan 28, 2026",
-      amount: "KES 2,500",
-    },
-    {
-      id: "3",
-      service: "Cleaning",
-      description: "Deep house cleaning",
-      status: "completed",
-      date: "Jan 25, 2026",
-      amount: "KES 4,000",
-    },
-  ];
 
   return (
     <div className="min-h-screen bg-gradient-hero">
@@ -155,7 +182,15 @@ const Dashboard = () => {
         </motion.div>
 
         {/* Active Jobs */}
-        {activeJobs.length > 0 && (
+        {jobsLoading ? (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            className="text-center py-8"
+          >
+            <div className="w-8 h-8 border-4 border-primary border-t-transparent rounded-full animate-spin mx-auto" />
+          </motion.div>
+        ) : activeJobs.length > 0 ? (
           <motion.section
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
@@ -166,83 +201,139 @@ const Dashboard = () => {
               Active Jobs
             </h2>
             <div className="space-y-3">
-              {activeJobs.map((job) => (
-                <div
-                  key={job.id}
-                  className="p-4 rounded-xl bg-card border border-border/50 shadow-sm"
-                >
-                  <div className="flex items-start justify-between mb-3">
-                    <div>
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-accent/10 text-accent text-xs font-medium mb-2">
-                        <Clock className="w-3 h-3" />
-                        In Progress
-                      </span>
-                      <h3 className="font-semibold text-foreground">{job.service}</h3>
-                      <p className="text-sm text-muted-foreground">{job.description}</p>
-                    </div>
-                    <ChevronRight className="w-5 h-5 text-muted-foreground" />
-                  </div>
+              {activeJobs.map((job) => {
+                const statusColors: { [key: string]: string } = {
+                  pending: "bg-yellow-500/10 text-yellow-600",
+                  matching: "bg-blue-500/10 text-blue-600",
+                  accepted: "bg-purple-500/10 text-purple-600",
+                  in_progress: "bg-accent/10 text-accent",
+                };
+                const statusLabels: { [key: string]: string } = {
+                  pending: "Pending",
+                  matching: "Finding Fundis",
+                  accepted: "Accepted",
+                  in_progress: "In Progress",
+                };
 
-                  {job.fundi && (
-                    <div className="flex items-center justify-between pt-3 border-t border-border/50">
-                      <div className="flex items-center gap-3">
-                        <div className="w-10 h-10 rounded-full bg-muted flex items-center justify-center font-semibold text-muted-foreground">
-                          {job.fundi.name.charAt(0)}
-                        </div>
-                        <div>
-                          <p className="font-medium text-foreground text-sm">{job.fundi.name}</p>
-                          <p className="text-xs text-muted-foreground flex items-center gap-1">
-                            <Star className="w-3 h-3 text-warning fill-warning" />
-                            {job.fundi.rating}
-                          </p>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm text-accent font-medium flex items-center gap-1">
-                          <MapPin className="w-4 h-4" />
-                          {job.fundi.eta}
+                return (
+                  <motion.div
+                    key={job.id}
+                    initial={{ opacity: 0, x: -20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    className="p-4 rounded-xl bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow"
+                  >
+                    {/* Job Header */}
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex-1">
+                        <span
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${
+                            statusColors[job.status] || "bg-muted text-muted-foreground"
+                          } text-xs font-medium mb-2`}
+                        >
+                          <Clock className="w-3 h-3" />
+                          {statusLabels[job.status] || job.status}
                         </span>
-                        <Button size="icon" variant="ghost">
-                          <MessageSquare className="w-4 h-4" />
-                        </Button>
+                        <h3 className="font-semibold text-foreground">{job.title}</h3>
+                        <p className="text-sm text-muted-foreground line-clamp-2">{job.description}</p>
                       </div>
+                      <ChevronRight className="w-5 h-5 text-muted-foreground" />
                     </div>
-                  )}
-                </div>
+
+                    {/* Job Details */}
+                    <div className="flex items-center justify-between pt-3 border-t border-border/50 text-sm">
+                      <div className="flex items-center gap-2 text-muted-foreground">
+                        <MapPin className="w-4 h-4" />
+                        <span className="truncate">{job.location}</span>
+                      </div>
+                      <span className="text-xs font-medium text-primary capitalize">
+                        {job.urgency}
+                      </span>
+                    </div>
+
+                    {/* Photo Preview */}
+                    {job.job_photos && job.job_photos.length > 0 && (
+                      <div className="mt-3 flex gap-2">
+                        {job.job_photos.slice(0, 3).map((photo) => (
+                          <img
+                            key={photo.id}
+                            src={photo.photo_url}
+                            alt="Job"
+                            className="w-12 h-12 rounded-lg object-cover border border-border"
+                          />
+                        ))}
+                        {job.job_photos.length > 3 && (
+                          <div className="w-12 h-12 rounded-lg bg-muted flex items-center justify-center text-xs font-medium text-muted-foreground">
+                            +{job.job_photos.length - 3}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </motion.div>
+                );
+              })}
+            </div>
+          </motion.section>
+        ) : null}
+
+        {/* Recent Jobs */}
+        {recentJobs.length > 0 && (
+          <motion.section
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.3 }}
+          >
+            <h2 className="text-lg font-display font-semibold text-foreground mb-4">
+              Completed Jobs
+            </h2>
+            <div className="space-y-3">
+              {recentJobs.map((job) => (
+                <motion.div
+                  key={job.id}
+                  initial={{ opacity: 0, x: -20 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  className="p-4 rounded-xl bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow flex items-center justify-between"
+                >
+                  <div className="flex items-center gap-3 flex-1">
+                    <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center">
+                      <CheckCircle className="w-5 h-5 text-success" />
+                    </div>
+                    <div className="flex-1">
+                      <h3 className="font-medium text-foreground">{job.title}</h3>
+                      <p className="text-sm text-muted-foreground">
+                        Completed on {new Date(job.updated_at).toLocaleDateString()}
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs font-medium text-primary capitalize">
+                    {job.service_category?.name || job.urgency}
+                  </span>
+                </motion.div>
               ))}
             </div>
           </motion.section>
         )}
 
-        {/* Recent Jobs */}
-        <motion.section
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.3 }}
-        >
-          <h2 className="text-lg font-display font-semibold text-foreground mb-4">
-            Recent Jobs
-          </h2>
-          <div className="space-y-3">
-            {recentJobs.map((job) => (
-              <div
-                key={job.id}
-                className="p-4 rounded-xl bg-card border border-border/50 shadow-sm flex items-center justify-between"
-              >
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-success/10 flex items-center justify-center">
-                    <CheckCircle className="w-5 h-5 text-success" />
-                  </div>
-                  <div>
-                    <h3 className="font-medium text-foreground">{job.service}</h3>
-                    <p className="text-sm text-muted-foreground">{job.date}</p>
-                  </div>
-                </div>
-                <span className="font-semibold text-foreground">{job.amount}</span>
-              </div>
-            ))}
-          </div>
-        </motion.section>
+        {/* Empty State */}
+        {!jobsLoading && activeJobs.length === 0 && recentJobs.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.2 }}
+            className="text-center py-12"
+          >
+            <AlertCircle className="w-12 h-12 text-muted-foreground mx-auto mb-4" />
+            <h3 className="text-lg font-semibold text-foreground mb-2">No Jobs Yet</h3>
+            <p className="text-muted-foreground mb-6">
+              Create your first job request to get started with FundiHub
+            </p>
+            <Link to="/create-job">
+              <Button variant="hero">
+                <Plus className="w-4 h-4" />
+                Create Job Request
+              </Button>
+            </Link>
+          </motion.div>
+        )}
       </main>
     </div>
   );
