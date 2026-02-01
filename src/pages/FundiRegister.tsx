@@ -37,6 +37,9 @@ interface VerificationData {
   idPhoto: File | null;
   idPhotoPreview: string;
   idPhotoBase64?: string;
+  idPhotoBack: File | null;
+  idPhotoBackPreview: string;
+  idPhotoBackBase64?: string;
   extractedIdName: string;
   idNameMatches: boolean;
   selfiePhoto: Blob | null;
@@ -504,6 +507,7 @@ const FundiRegister = () => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const idPhotoBackInputRef = useRef<HTMLInputElement>(null);
   const selfieFileInputRef = useRef<HTMLInputElement>(null);
 
   const [step, setStep] = useState(1);
@@ -545,6 +549,8 @@ const FundiRegister = () => {
     idNumber: "",
     idPhoto: null,
     idPhotoPreview: "",
+    idPhotoBack: null,
+    idPhotoBackPreview: "",
     extractedIdName: "",
     idNameMatches: false,
     selfiePhoto: null,
@@ -831,6 +837,32 @@ const FundiRegister = () => {
       toast.error("Failed to process ID image");
       setLoading(false);
     }
+  };
+
+  const handleIDBackUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      toast.error("Only image files allowed");
+      return;
+    }
+
+    if (file.size > 10 * 1024 * 1024) {
+      toast.error("File must be less than 10MB");
+      return;
+    }
+
+    const preview = URL.createObjectURL(file);
+    setData((prev) => ({ ...prev, idPhotoBack: file, idPhotoBackPreview: preview }));
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const imageData = e.target?.result as string;
+      setData((prev) => ({ ...prev, idPhotoBackBase64: imageData }));
+    };
+    reader.readAsDataURL(file);
+    toast.success("✓ ID back photo uploaded");
   };
 
   const handleStep2Next = () => {
@@ -1164,6 +1196,7 @@ const FundiRegister = () => {
         
         // File objects (will be uploaded by the service)
         idPhotoFile: data.idPhoto as any,
+        idPhotoBackFile: data.idPhotoBack as any,
         selfieFile: data.selfiePhoto as any,
         
         // GPS Data
@@ -1351,6 +1384,7 @@ const FundiRegister = () => {
                 </div>
               ) : (
                 <div className="space-y-4">
+                  {/* Front ID Photo */}
                   <div className="relative">
                     <img src={data.idPhotoPreview} alt="ID" className="w-full h-64 object-cover rounded-lg border border-border" />
                     <button
@@ -1365,6 +1399,34 @@ const FundiRegister = () => {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
+
+                  {/* Back ID Photo Upload */}
+                  {!data.idPhotoBackPreview ? (
+                    <div
+                      onClick={() => idPhotoBackInputRef.current?.click()}
+                      className="border-2 border-dashed border-border rounded-lg p-6 text-center cursor-pointer hover:border-primary hover:bg-primary/5 transition-all"
+                    >
+                      <Upload className="w-10 h-10 text-muted-foreground mx-auto mb-2" />
+                      <p className="text-foreground font-medium mb-1">Upload ID Back Photo</p>
+                      <p className="text-sm text-muted-foreground">Optional - back side of your ID</p>
+                      <input ref={idPhotoBackInputRef} type="file" accept="image/*" onChange={handleIDBackUpload} className="hidden" aria-label="Upload ID back photo" />
+                    </div>
+                  ) : (
+                    <div className="relative">
+                      <img src={data.idPhotoBackPreview} alt="ID Back" className="w-full h-48 object-cover rounded-lg border border-border" />
+                      <button
+                        onClick={() => {
+                          setData((prev) => ({ ...prev, idPhotoBack: null, idPhotoBackPreview: "" }));
+                        }}
+                        className="absolute top-2 right-2 bg-destructive hover:bg-destructive/90 text-white p-2 rounded-lg transition"
+                        title="Remove ID back photo"
+                        aria-label="Remove ID back photo"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                      <p className="text-xs text-muted-foreground mt-2">✓ ID back photo uploaded</p>
+                    </div>
+                  )}
 
                   {/* Resolved Location Name */}
                   <div className="p-3 bg-secondary rounded-lg border border-border">
