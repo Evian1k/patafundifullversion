@@ -254,34 +254,50 @@ const CreateJob = () => {
   const initializeMap = (latitude: number, longitude: number) => {
     if (typeof window === 'undefined' || !window.L || !mapRef.current) return;
     
-    // Remove existing map if it exists
     const mapElement = mapRef.current as any;
+    
+    // Remove existing map if it exists
     if (mapElement._leaflet_map) {
-      mapElement._leaflet_map.remove();
+      try {
+        mapElement._leaflet_map.remove();
+      } catch (e) {
+        // Ignore errors during cleanup
+      }
     }
 
-    const map = window.L.map(mapRef.current).setView([latitude, longitude], 13);
-    
-    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '© OpenStreetMap contributors',
-      maxZoom: 19,
-    }).addTo(map);
-    
-    window.L.marker([latitude, longitude]).addTo(map);
-    
-    mapElement._leaflet_map = map;
+    try {
+      const map = window.L.map(mapElement, {
+        center: [latitude, longitude],
+        zoom: 16,
+      });
+      
+      window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors',
+        maxZoom: 19,
+      }).addTo(map);
+      
+      window.L.marker([latitude, longitude])
+        .bindPopup(`Location: ${latitude.toFixed(4)}, ${longitude.toFixed(4)}`)
+        .addTo(map)
+        .openPopup();
+      
+      mapElement._leaflet_map = map;
+    } catch (error) {
+      console.error('Error initializing map:', error);
+    }
   };
 
-  // Map initialization effect
+  // Map initialization effect - trigger whenever coordinates or leaflet changes
   useEffect(() => {
-    if (step === 3 && jobData.latitude !== undefined && jobData.longitude !== undefined && leafletLoaded) {
-      setTimeout(() => {
-        if (jobData.latitude !== undefined && jobData.longitude !== undefined) {
-          initializeMap(jobData.latitude, jobData.longitude);
-        }
-      }, 100);
+    if (leafletLoaded && jobData.latitude !== undefined && jobData.longitude !== undefined && mapRef.current) {
+      // Use a small timeout to ensure DOM is ready
+      const timeoutId = setTimeout(() => {
+        initializeMap(jobData.latitude!, jobData.longitude!);
+      }, 50);
+      
+      return () => clearTimeout(timeoutId);
     }
-  }, [step, leafletLoaded, jobData.latitude, jobData.longitude]);
+  }, [leafletLoaded, jobData.latitude, jobData.longitude]);
 
   // Get user's current location via GPS
   const captureLocation = async () => {
