@@ -51,11 +51,11 @@ export default function AdminDashboard() {
           .select("id", { count: "exact" })
           .eq("verification_status", "pending");
 
-        // Fetch active jobs
+        // Fetch active jobs (in_progress or accepted)
         const { count: activeJobsCount } = await supabase
           .from("jobs")
           .select("id", { count: "exact" })
-          .eq("status", "assigned");
+          .in("status", ["in_progress", "accepted"]);
 
         // Fetch total revenue from completed jobs
         const { data: completedJobs } = await supabase
