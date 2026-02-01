@@ -79,6 +79,8 @@ interface JobData {
   latitude?: number;
   longitude?: number;
   locationName?: string;
+  scheduledDate?: string;
+  scheduledTime?: string;
   photos: PhotoData[];
 }
 
@@ -121,6 +123,8 @@ const CreateJob = () => {
     latitude: undefined,
     longitude: undefined,
     locationName: "",
+    scheduledDate: "",
+    scheduledTime: "",
     photos: [] as PhotoData[],
   });
   const [user, setUser] = useState<{ id?: string; user_metadata?: { full_name?: string } } | null>(null);
@@ -683,6 +687,59 @@ const CreateJob = () => {
                       </button>
                     ))}
                   </div>
+
+                  {/* Date and Time Picker - Show only for Scheduled option */}
+                  {jobData.urgency === "scheduled" && (
+                    <div className="p-4 rounded-xl bg-accent/5 border-2 border-accent/20 space-y-4">
+                      <h3 className="font-semibold text-foreground">Pick your preferred date and time</h3>
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Date Picker */}
+                        <div>
+                          <label htmlFor="scheduled-date" className="block text-sm font-medium text-foreground mb-2">
+                            Date
+                          </label>
+                          <input
+                            id="scheduled-date"
+                            type="date"
+                            value={jobData.scheduledDate || ""}
+                            onChange={(e) => setJobData({ ...jobData, scheduledDate: e.target.value })}
+                            min={new Date().toISOString().split('T')[0]}
+                            className="w-full h-10 px-3 bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                          />
+                        </div>
+                        
+                        {/* Time Picker */}
+                        <div>
+                          <label htmlFor="scheduled-time" className="block text-sm font-medium text-foreground mb-2">
+                            Time
+                          </label>
+                          <input
+                            id="scheduled-time"
+                            type="time"
+                            value={jobData.scheduledTime || ""}
+                            onChange={(e) => setJobData({ ...jobData, scheduledTime: e.target.value })}
+                            className="w-full h-10 px-3 bg-background border border-border rounded-lg focus:outline-none focus:ring-2 focus:ring-accent/50 focus:border-accent transition-all"
+                          />
+                        </div>
+                      </div>
+                      
+                      {/* Display selected date/time */}
+                      {jobData.scheduledDate && jobData.scheduledTime && (
+                        <div className="p-2 rounded bg-background border border-border">
+                          <p className="text-sm text-muted-foreground">
+                            📅 Scheduled for: <span className="font-semibold text-foreground">
+                              {new Date(jobData.scheduledDate).toLocaleDateString('en-US', { 
+                                weekday: 'long', 
+                                year: 'numeric', 
+                                month: 'long', 
+                                day: 'numeric' 
+                              })} at {jobData.scheduledTime}
+                            </span>
+                          </p>
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   <div>
                     <label htmlFor="service-location" className="block text-sm font-medium text-foreground mb-2">
