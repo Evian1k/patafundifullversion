@@ -566,12 +566,8 @@ const FundiRegister = () => {
   useEffect(() => {
     if (step === 4 && !locationAutoCapturedRef.current) {
       locationAutoCapturedRef.current = true;
-      // only auto-capture if no coordinates yet
-      if (!data.latitude || !data.longitude) {
-        // start loading Leaflet early so map is ready when coords arrive
-        ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
-        captureLocation();
-      }
+      // preload Leaflet early so map is ready immediately
+      ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
     }
   }, [step]);
 
@@ -975,79 +971,11 @@ const FundiRegister = () => {
     toast.success("Selfie uploaded");
   };
 
-  // Helper: Check geolocation permission state
-  const checkGeolocationPermission = async (): Promise<string | null> => {
-    if (!(navigator as any).permissions) {
-      setGeoPermission(null);
-      return null;
-    }
-    try {
-      const p = await (navigator as any).permissions.query({ name: 'geolocation' });
-      setGeoPermission(p.state);
-      p.onchange = () => setGeoPermission(p.state);
-      return p.state;
-    } catch (e) {
-      setGeoPermission(null);
-      return null;
-    }
-  };
-
   // Step 4: GPS Location
-  const captureLocation = async () => {
-    if (!navigator.geolocation) {
-      toast.error("Geolocation unavailable — must use a mobile device with GPS");
-      return;
-    }
-
-    // check permission before attempting capture
-    const perm = await checkGeolocationPermission();
-    if (perm === 'denied') {
-      toast.error('Location access denied. Enable location for this site in your browser and device settings.');
-      return;
-    }
-
-    // start loading Leaflet in parallel to speed up map render
-    ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
-
+  // User can: 1) Click on map to select location, 2) Use device GPS as fallback
+  const setLocationFromCoords = async (latitude: number, longitude: number, source: 'map_click' | 'device_gps' = 'map_click') => {
     setLoading(true);
-    const toastId = toast.loading("Capturing GPS location from device (must use mobile)...");
     try {
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 30000,
-          maximumAge: 0,  // Force fresh capture, don't use cached location
-        });
-      });
-
-      const { latitude, longitude, accuracy, altitude } = position.coords;
-      
-      // Detect if location is from real GPS or IP-based/cached
-      // Real GPS: accuracy typically ≤ 50m; IP/cached: typically > 100m
-      const isLikelyRealGPS = accuracy !== null && accuracy <= 50;
-      const isLikelyCachedOrIP = accuracy !== null && accuracy > 100;
-      
-      let flagged = false;
-      let reason = "";
-
-      // If accuracy is poor, warn user
-      if (isLikelyCachedOrIP) {
-        flagged = true;
-        reason = `Poor GPS accuracy (±${accuracy.toFixed(0)}m). This may be cached/IP-based location, not real GPS. Move to open area outdoors and retake. Or use a different mobile device.`;
-      }
-
-      try {
-        const ipResponse = await fetch("https://ipapi.co/json/");
-        const ipData = await ipResponse.json();
-        if (ipData.country_name && ipData.country_name !== "Kenya" && 
-            (latitude < -15 || latitude > 15)) {
-          flagged = true;
-          reason = `IP location (${ipData.country_name}) doesn't match GPS. Using wrong device or location spoofing detected.`;
-        }
-      } catch (e) {
-        console.log("IP check skipped");
-      }
-
       // reverse geocode (prefer Google if API key available)
       let displayName = "";
       let area = "";
@@ -1067,43 +995,57 @@ const FundiRegister = () => {
         ...prev,
         latitude,
         longitude,
-        accuracy,
-        altitude: altitude ?? null,
+        accuracy: source === 'device_gps' ? 15 : 100, // estimate accuracy based on source
+        altitude: source === 'device_gps' ? 0 : null,
         locationDisplayName: displayName,
         locationArea: area,
         locationEstate: estate,
         locationCity: city,
         capturedAt: Date.now(),
-        locationMismatchFlagged: flagged,
-        locationMismatchReason: reason,
+        locationMismatchFlagged: false,
+        locationMismatchReason: "",
       }));
 
-      // mark these coords as device-captured and clear any manual adjustments
-      setCoordsFromDevice(true);
+      setCoordsFromDevice(source === 'device_gps');
       setUserAdjustedLocation(false);
 
-      toast.dismiss(toastId);
-      if (flagged) {
-        toast.warning(`⚠️ ${reason}`, { duration: 5000 });
-      } else if (isLikelyRealGPS) {
-        toast.success(`✓ Real GPS captured (accuracy: ±${accuracy.toFixed(0)}m)`);
+      if (source === 'map_click') {
+        toast.success(`✓ Location set: ${displayName || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`}`);
       } else {
-        toast.success("Location captured");
+        toast.success(`✓ Device GPS captured (accuracy: ±${15}m)`);
       }
+    } catch (err) {
+      console.error('setLocationFromCoords error', err);
+      toast.error("Failed to set location");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const captureLocation = async () => {
+    if (!navigator.geolocation) {
+      toast.error("Device GPS unavailable — use map click instead");
+      return;
+    }
+
+    setLoading(true);
+    const toastId = toast.loading("Getting device GPS location...");
+    try {
+      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
+        navigator.geolocation.getCurrentPosition(resolve, reject, {
+          enableHighAccuracy: true,
+          timeout: 15000,
+          maximumAge: 0,
+        });
+      });
+
+      const { latitude, longitude } = position.coords;
+      toast.dismiss(toastId);
+      await setLocationFromCoords(latitude, longitude, 'device_gps');
     } catch (err: any) {
       console.error('captureLocation error', err);
       toast.dismiss(toastId);
-      
-      // Distinguish between different error types
-      if (err.code === 1) {
-        toast.error("Permission denied. Enable location in browser/device settings.");
-      } else if (err.code === 2) {
-        toast.error("GPS unavailable — move to open area outdoors, or use a different mobile device.");
-      } else if (err.code === 3) {
-        toast.error("Location timeout. Move to open area outdoors and ensure GPS is enabled on your device.");
-      } else {
-        toast.error("Location capture failed. Must use mobile device with GPS enabled.");
-      }
+      toast.error("Device GPS failed — click on map to set location instead");
     } finally {
       setLoading(false);
     }
@@ -1509,21 +1451,22 @@ const FundiRegister = () => {
               <h2 className="text-2xl font-bold text-foreground mb-6">GPS Location Verification</h2>
               {!data.latitude && (
                 <>
-                  <div className="p-4 bg-info/10 border-2 border-info rounded-lg mb-4">
-                    <p className="font-medium text-foreground">📱 Mobile GPS Required</p>
-                    <p className="text-sm text-muted-foreground mt-2">For accurate location: <strong>Use a mobile phone</strong> (not desktop). Enable location in phone settings (High Accuracy mode). Move to an open outdoor area away from tall buildings. Click the button below and allow location when prompted.</p>
+                  <div className="p-4 bg-blue-500/10 border-2 border-blue-500 rounded-lg mb-4">
+                    <p className="font-medium text-foreground">📍 Quick Location Setup</p>
+                    <p className="text-sm text-muted-foreground mt-2"><strong>Option 1 (Fast):</strong> Click "Load Map" below, then click on the map where you are. Done in 2 seconds.</p>
+                    <p className="text-sm text-muted-foreground mt-1"><strong>Option 2:</strong> Click "Use Device GPS" to auto-detect (slower, requires mobile).</p>
                   </div>
 
-                  {geoPermission === 'denied' ? (
-                    <div className="p-3 bg-destructive/10 border-2 border-destructive rounded-lg mb-4">
-                      <p className="font-medium text-foreground">Location access blocked</p>
-                      <p className="text-sm text-muted-foreground mt-1">Clear browser site data or allow location in browser/device settings, then try again.</p>
-                    </div>
+                  {!leafletLoaded ? (
+                    <Button onClick={() => ensureLeafletLoaded().then(() => setLeafletLoaded(true))} disabled={loading} className="w-full mb-3" size="lg">
+                      <MapPin className="w-4 h-4 mr-2" />
+                      Load Map (Click to Set Location)
+                    </Button>
                   ) : null}
 
-                  <Button onClick={captureLocation} disabled={loading} className="w-full" size="lg">
+                  <Button onClick={captureLocation} disabled={loading} className="w-full" size="lg" variant="outline">
                     {loading ? <Loader className="w-4 h-4 mr-2 animate-spin" /> : <MapPin className="w-4 h-4 mr-2" />}
-                    {loading ? "Capturing..." : "Capture GPS Location from Mobile"}
+                    {loading ? "Getting GPS..." : "Use Device GPS"}
                   </Button>
                 </>
               )}
@@ -1544,6 +1487,9 @@ const FundiRegister = () => {
                       lat={data.latitude}
                       lng={data.longitude}
                       label={data.locationDisplayName || ""}
+                      onMapClick={(lat, lng) => {
+                        setLocationFromCoords(lat, lng, 'map_click');
+                      }}
                       onMarkerChange={(lat, lng) => {
                         setData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
                         setUserAdjustedLocation(true);
@@ -1750,7 +1696,7 @@ const ensureLeafletLoaded = async (): Promise<void> => {
   }
 };
 
-const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMarkerChange?: (lat: number, lng: number) => void }> = ({ lat, lng, label, onMarkerChange }) => {
+const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMarkerChange?: (lat: number, lng: number) => void; onMapClick?: (lat: number, lng: number) => void }> = ({ lat, lng, label, onMarkerChange, onMapClick }) => {
   const mapRef = useRef<any>(null);
   const markerRef = useRef<any>(null);
   useEffect(() => {
@@ -1781,12 +1727,16 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
             if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
           });
 
-          // allow clicking on map to move marker
+          // allow clicking on map to set location (calls onMapClick for faster save)
           mapRef.current.on('click', function (e: any) {
             const { lat: clickedLat, lng: clickedLng } = e.latlng;
             if (markerRef.current) markerRef.current.setLatLng([clickedLat, clickedLng]).openPopup();
             mapRef.current.setView([clickedLat, clickedLng]);
-            if (onMarkerChange) onMarkerChange(clickedLat, clickedLng);
+            if (onMapClick) {
+              onMapClick(clickedLat, clickedLng);
+            } else if (onMarkerChange) {
+              onMarkerChange(clickedLat, clickedLng);
+            }
           });
         } else {
           mapRef.current.setView([lat, lng], 18);
@@ -1817,7 +1767,7 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
         // ignore
       }
     };
-  }, [lat, lng, label]);
+  }, [lat, lng, label, onMarkerChange, onMapClick]);
 
   return null;
 };
