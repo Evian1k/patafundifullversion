@@ -9,6 +9,7 @@ import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
 import CreateJob from "./pages/CreateJob";
 import FundiRegister from "./pages/FundiRegister";
+import Settings from "./pages/Settings";
 import NotFound from "./pages/NotFound";
 
 const App = () => {
@@ -34,6 +35,7 @@ const App = () => {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/create-job" element={<CreateJob />} />
             <Route path="/fundi/register" element={<FundiRegister />} />
+            <Route path="/settings" element={<Settings />} />
 
             {/* Admin routes removed */}
 
