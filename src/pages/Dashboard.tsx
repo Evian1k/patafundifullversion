@@ -13,8 +13,7 @@ import {
   Wrench,
   ChevronRight,
   AlertCircle,
-  Trash2,
-  Zap
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
