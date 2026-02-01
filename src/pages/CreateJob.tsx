@@ -482,7 +482,24 @@ const CreateJob = () => {
 
   return (
     <div className="min-h-screen bg-gradient-hero">
-      <Header />
+      {/* Custom Header with Back Button */}
+      <header className="fixed top-0 left-0 right-0 z-50 bg-background/80 backdrop-blur-sm border-b border-border">
+        <div className="container mx-auto px-4 h-16 flex items-center justify-between">
+          <button
+            onClick={() => navigate(-1)}
+            className="flex items-center gap-2 text-primary hover:text-primary/80 transition-colors"
+          >
+            <ArrowLeft className="w-5 h-5" />
+            <span className="font-medium">Back</span>
+          </button>
+          
+          <div className="flex-1 text-center">
+            <span className="text-lg font-display font-bold text-foreground">Create Job Request</span>
+          </div>
+          
+          <div className="w-24" />
+        </div>
+      </header>
       
       <main className="pt-24 pb-12">
         <div className="container mx-auto px-4 max-w-2xl">
