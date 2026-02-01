@@ -10,11 +10,13 @@ import { toast } from "sonner";
 interface FundiApplication {
   id: string;
   user_id: string;
-  id_number: string;
-  id_photo_url: string;
-  selfie_url: string;
-  verification_status: string;
+  id_number: string | null;
+  id_photo_url: string | null;
+  selfie_url: string | null;
+  verification_status: "pending" | "verified" | "rejected" | null;
   created_at: string;
+  bio: string | null;
+  skills: string[];
 }
 
 export default function VerificationManagement() {
@@ -35,7 +37,7 @@ export default function VerificationManagement() {
       (app) =>
         app.id_number?.includes(searchTerm) ||
         app.id.includes(searchTerm) ||
-        app.verification_status.includes(searchTerm)
+        app.verification_status?.includes(searchTerm)
     );
     setFilteredApps(filtered);
   }, [searchTerm, applications]);
@@ -62,7 +64,7 @@ export default function VerificationManagement() {
     try {
       const { error } = await supabase
         .from("fundi_profiles")
-        .update({ verification_status: "approved" })
+        .update({ verification_status: "verified" })
         .eq("id", app.id);
 
       if (error) throw error;
@@ -93,7 +95,6 @@ export default function VerificationManagement() {
 
       if (error) throw error;
 
-      // Store rejection reason in a audit log or notes field
       toast.success("Application rejected with reason provided");
       setSelectedApp(null);
       setRejectReason("");
@@ -105,9 +106,9 @@ export default function VerificationManagement() {
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: string | null) => {
     switch (status) {
-      case "approved":
+      case "verified":
         return "text-green-500";
       case "rejected":
         return "text-red-500";
@@ -118,9 +119,9 @@ export default function VerificationManagement() {
     }
   };
 
-  const getStatusBg = (status: string) => {
+  const getStatusBg = (status: string | null) => {
     switch (status) {
-      case "approved":
+      case "verified":
         return "bg-green-500/10";
       case "rejected":
         return "bg-red-500/10";
@@ -187,14 +188,14 @@ export default function VerificationManagement() {
                     <div className="flex-1">
                       <div className="flex items-center gap-2 mb-2">
                         <code className="text-sm font-mono text-primary">
-                          {app.id_number}
+                          {app.id_number || "No ID"}
                         </code>
                         <span
                           className={`px-2 py-1 rounded-full text-xs font-semibold ${getStatusBg(
                             app.verification_status
                           )} ${getStatusColor(app.verification_status)}`}
                         >
-                          {app.verification_status}
+                          {app.verification_status || "unknown"}
                         </span>
                       </div>
                       <p className="text-xs text-muted-foreground">
@@ -203,6 +204,18 @@ export default function VerificationManagement() {
                       <p className="text-xs text-muted-foreground">
                         {new Date(app.created_at).toLocaleDateString()}
                       </p>
+                      {app.skills && app.skills.length > 0 && (
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {app.skills.slice(0, 3).map((skill, idx) => (
+                            <span key={idx} className="text-xs bg-slate-200 dark:bg-slate-700 px-2 py-0.5 rounded">
+                              {skill}
+                            </span>
+                          ))}
+                          {app.skills.length > 3 && (
+                            <span className="text-xs text-muted-foreground">+{app.skills.length - 3} more</span>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                 </Card>
@@ -222,15 +235,15 @@ export default function VerificationManagement() {
               {/* ID Photo */}
               <div>
                 <p className="text-sm font-semibold mb-2">ID Photo</p>
-                {selectedApp.id_photo_url && selectedApp.id_photo_url.startsWith("data:") ? (
+                {selectedApp.id_photo_url ? (
                   <img
                     src={selectedApp.id_photo_url}
                     alt="ID"
                     className="w-full h-48 object-cover rounded-lg border border-border"
                   />
                 ) : (
-                  <div className="w-full h-48 bg-slate-200 rounded-lg flex items-center justify-center text-muted-foreground">
-                    No image
+                  <div className="w-full h-48 bg-slate-200 dark:bg-slate-700 rounded-lg flex items-center justify-center text-muted-foreground">
+                    No image uploaded
                   </div>
                 )}
               </div>
@@ -238,15 +251,15 @@ export default function VerificationManagement() {
               {/* Selfie Photo */}
               <div>
                 <p className="text-sm font-semibold mb-2">Selfie Photo</p>
-                {selectedApp.selfie_url && selectedApp.selfie_url.startsWith("data:") ? (
+                {selectedApp.selfie_url ? (
                   <img
                     src={selectedApp.selfie_url}
                     alt="Selfie"
                     className="w-full h-48 object-cover rounded-lg border border-border"
                   />
                 ) : (
-                  <div className="w-full h-48 bg-slate-200 rounded-lg flex items-center justify-center text-muted-foreground">
-                    No image
+                  <div className="w-full h-48 bg-slate-200 dark:bg-slate-700 rounded-lg flex items-center justify-center text-muted-foreground">
+                    No selfie uploaded
                   </div>
                 )}
               </div>
@@ -254,14 +267,19 @@ export default function VerificationManagement() {
               {/* Details */}
               <div className="space-y-2">
                 <p className="text-sm">
-                  <span className="font-semibold">ID Number:</span> {selectedApp.id_number}
+                  <span className="font-semibold">ID Number:</span> {selectedApp.id_number || "Not provided"}
                 </p>
                 <p className="text-sm">
                   <span className="font-semibold">Status:</span>{" "}
                   <span className={getStatusColor(selectedApp.verification_status)}>
-                    {selectedApp.verification_status}
+                    {selectedApp.verification_status || "unknown"}
                   </span>
                 </p>
+                {selectedApp.bio && (
+                  <p className="text-sm">
+                    <span className="font-semibold">Bio:</span> {selectedApp.bio}
+                  </p>
+                )}
                 <p className="text-sm text-muted-foreground">
                   Submitted: {new Date(selectedApp.created_at).toLocaleString()}
                 </p>
@@ -276,7 +294,7 @@ export default function VerificationManagement() {
                     className="w-full bg-green-600 hover:bg-green-700"
                   >
                     <Check className="w-4 h-4 mr-2" />
-                    Approve
+                    Approve (Verify)
                   </Button>
 
                   <div>

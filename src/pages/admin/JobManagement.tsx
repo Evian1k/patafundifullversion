@@ -14,11 +14,13 @@ import {
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
+type JobStatus = "pending" | "matching" | "accepted" | "in_progress" | "completed" | "cancelled" | "disputed";
+
 interface Job {
   id: string;
   title: string;
   description: string;
-  status: string;
+  status: JobStatus | null;
   customer_id: string;
   fundi_id: string | null;
   location: string;
@@ -82,7 +84,7 @@ export default function JobManagement() {
     try {
       const { error } = await supabase
         .from("jobs")
-        .update({ status: "cancelled" })
+        .update({ status: "cancelled" as JobStatus })
         .eq("id", jobId);
 
       if (error) throw error;
@@ -93,49 +95,53 @@ export default function JobManagement() {
     }
   };
 
-  const handlePauseJob = async (jobId: string) => {
+  const handleDisputeJob = async (jobId: string) => {
     try {
       const { error } = await supabase
         .from("jobs")
-        .update({ status: "paused" })
+        .update({ status: "disputed" as JobStatus })
         .eq("id", jobId);
 
       if (error) throw error;
-      toast.success("Job paused");
+      toast.success("Job marked as disputed");
       fetchJobs();
     } catch (error) {
-      toast.error("Failed to pause job");
+      toast.error("Failed to mark job as disputed");
     }
   };
 
-  const getStatusColor = (status: string) => {
+  const getStatusColor = (status: string | null) => {
     switch (status) {
       case "completed":
         return "text-green-500";
       case "cancelled":
         return "text-red-500";
-      case "assigned":
+      case "accepted":
+      case "in_progress":
         return "text-blue-500";
       case "pending":
+      case "matching":
         return "text-yellow-500";
-      case "paused":
+      case "disputed":
         return "text-orange-500";
       default:
         return "text-muted-foreground";
     }
   };
 
-  const getStatusBg = (status: string) => {
+  const getStatusBg = (status: string | null) => {
     switch (status) {
       case "completed":
         return "bg-green-500/10";
       case "cancelled":
         return "bg-red-500/10";
-      case "assigned":
+      case "accepted":
+      case "in_progress":
         return "bg-blue-500/10";
       case "pending":
+      case "matching":
         return "bg-yellow-500/10";
-      case "paused":
+      case "disputed":
         return "bg-orange-500/10";
       default:
         return "bg-slate-500/10";
@@ -180,10 +186,12 @@ export default function JobManagement() {
             <SelectContent>
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="assigned">Assigned</SelectItem>
+              <SelectItem value="matching">Matching</SelectItem>
+              <SelectItem value="accepted">Accepted</SelectItem>
+              <SelectItem value="in_progress">In Progress</SelectItem>
               <SelectItem value="completed">Completed</SelectItem>
               <SelectItem value="cancelled">Cancelled</SelectItem>
-              <SelectItem value="paused">Paused</SelectItem>
+              <SelectItem value="disputed">Disputed</SelectItem>
             </SelectContent>
           </Select>
         </Card>
@@ -227,7 +235,7 @@ export default function JobManagement() {
                           job.status
                         )} ${getStatusColor(job.status)}`}
                       >
-                        {job.status}
+                        {job.status || "unknown"}
                       </span>
                     </div>
                     <p className="text-sm text-muted-foreground line-clamp-1">
@@ -238,7 +246,7 @@ export default function JobManagement() {
                       {job.location}
                     </div>
                     <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>Est: KES {job.estimated_price}</span>
+                      <span>Est: KES {job.estimated_price || 0}</span>
                       {job.final_price && <span>Final: KES {job.final_price}</span>}
                     </div>
                   </div>
@@ -264,7 +272,7 @@ export default function JobManagement() {
                     selectedJob.status
                   )} ${getStatusColor(selectedJob.status)}`}
                 >
-                  {selectedJob.status}
+                  {selectedJob.status || "unknown"}
                 </span>
               </div>
 
@@ -292,7 +300,7 @@ export default function JobManagement() {
               <div className="space-y-2">
                 <p className="text-sm font-semibold">Pricing</p>
                 <div className="text-sm space-y-1">
-                  <p>Estimated: <span className="font-mono">KES {selectedJob.estimated_price}</span></p>
+                  <p>Estimated: <span className="font-mono">KES {selectedJob.estimated_price || 0}</span></p>
                   {selectedJob.final_price && (
                     <p>Final: <span className="font-mono">KES {selectedJob.final_price}</span></p>
                   )}
@@ -311,11 +319,11 @@ export default function JobManagement() {
               {selectedJob.status !== "completed" && selectedJob.status !== "cancelled" && (
                 <div className="pt-4 border-t border-border space-y-2">
                   <Button
-                    onClick={() => handlePauseJob(selectedJob.id)}
+                    onClick={() => handleDisputeJob(selectedJob.id)}
                     variant="outline"
                     className="w-full"
                   >
-                    Pause Job
+                    Mark as Disputed
                   </Button>
                   <Button
                     onClick={() => handleCancelJob(selectedJob.id)}
