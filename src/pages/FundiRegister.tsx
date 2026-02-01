@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef } from "react";
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import Tesseract from "tesseract.js";
+import { handleFundiSubmission, FundiRegistrationData } from "@/modules/fundis";
 import {
   ArrowLeft,
   ArrowRight,
@@ -50,6 +50,11 @@ interface VerificationData {
   latitude: number | null;
   longitude: number | null;
   accuracy: number | null;
+  altitude: number | null;
+  locationDisplayName: string;
+  locationArea: string;
+  locationEstate: string;
+  locationCity: string;
   capturedAt: number;
   locationMismatchFlagged: boolean;
   locationMismatchReason: string;
@@ -518,6 +523,11 @@ const FundiRegister = () => {
   const [coordsFromDevice, setCoordsFromDevice] = useState(false);
   const [userAdjustedLocation, setUserAdjustedLocation] = useState(false);
 
+  // Forward-geocoding search state
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<Array<{ display_name: string; lat: number; lon: number }>>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+
   const [verificationSteps, setVerificationSteps] = useState<VerificationStep[]>([
     { name: "Personal Info", completed: false, status: "pending" },
     { name: "Name Verification", completed: false, status: "pending" },
@@ -570,6 +580,19 @@ const FundiRegister = () => {
       ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
     }
   }, [step]);
+
+  // Preload Leaflet as soon as this component mounts to speed map display later
+  useEffect(() => {
+    let canceled = false;
+    ensureLeafletLoaded()
+      .then(() => {
+        if (!canceled) setLeafletLoaded(true);
+      })
+      .catch(() => {});
+    return () => {
+      canceled = true;
+    };
+  }, []);
 
   // preload leaflet when user navigates to step 4 (also allow manual preload)
   useEffect(() => {
@@ -1051,6 +1074,38 @@ const FundiRegister = () => {
     }
   };
 
+  const searchLocation = async (q?: string) => {
+    const query = (q ?? searchQuery).trim();
+    if (!query) {
+      setSearchResults([]);
+      return;
+    }
+    setSearchLoading(true);
+    setSearchResults([]);
+    try {
+      const key = (import.meta.env as any).VITE_GOOGLE_MAPS_API_KEY;
+      if (key) {
+        const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${key}`);
+        const j = await res.json();
+        const results = (j.results || []).slice(0, 5).map((r: any) => ({ display_name: r.formatted_address, lat: r.geometry.location.lat, lon: r.geometry.location.lng }));
+        setSearchResults(results);
+      } else {
+        // Nominatim fallback
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=5`, {
+          headers: { 'Accept-Language': 'en', 'User-Agent': 'FundiHub/1.0 (contact@fundihub.example)' },
+        });
+        const j = await res.json();
+        const results = (j || []).map((it: any) => ({ display_name: it.display_name, lat: parseFloat(it.lat), lon: parseFloat(it.lon) }));
+        setSearchResults(results);
+      }
+    } catch (err) {
+      console.error('searchLocation error', err);
+      toast.error('Location search failed');
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
   const handleStep4Next = () => {
     if (!data.latitude || !data.longitude) {
       toast.error("GPS location required");
@@ -1066,57 +1121,79 @@ const FundiRegister = () => {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      // Create auth account
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: data.email,
-        password: data.password,
-        options: {
-          data: {
-            full_name: `${data.firstName} ${data.lastName}`,
-            role: "fundi",
-            phone: data.phone,
+      // Create auth account if user doesn't exist
+      const { data: { user: currentUser } } = await supabase.auth.getUser();
+      let userId: string;
+
+      if (currentUser) {
+        userId = currentUser.id;
+      } else {
+        const { data: authData, error: authError } = await supabase.auth.signUp({
+          email: data.email,
+          password: data.password,
+          options: {
+            data: {
+              full_name: `${data.firstName} ${data.lastName}`,
+              role: "fundi",
+              phone: data.phone,
+            },
           },
+        });
+
+        if (authError) throw authError;
+        if (!authData.user?.id) throw new Error("Failed to create account");
+
+        userId = authData.user.id;
+
+        // Set the session if signup returned a session
+        if (authData.session) {
+          await supabase.auth.setSession(authData.session);
+        }
+      }
+
+      // Prepare registration data for backend
+      const registrationData: Partial<FundiRegistrationData> = {
+        userId,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        email: data.email,
+        phone: data.phone,
+        idNumber: data.idNumber,
+        idNumberExtracted: data.extractedIdName,
+        idNameExtracted: data.extractedIdName,
+        
+        // File objects (will be uploaded by the service)
+        idPhotoFile: data.idPhoto as any,
+        selfieFile: data.selfiePhoto as any,
+        
+        // GPS Data
+        gpsData: {
+          latitude: data.latitude!,
+          longitude: data.longitude!,
+          accuracy: data.accuracy || 50,
+          altitude: data.altitude,
+          address: data.locationDisplayName || "",
+          area: data.locationArea,
+          estate: data.locationEstate,
+          city: data.locationCity,
+          capturedAt: data.capturedAt,
         },
-      });
-
-      if (authError) throw authError;
-      if (!authData.user?.id) throw new Error("Failed to create account");
-
-      const userId = authData.user.id;
-
-      // Set the session if signup returned a session (no email confirmation required)
-      if (authData.session) {
-        await supabase.auth.setSession(authData.session);
-      }
-
-      // Create fundi profile with all verification data
-      const { error: profileErr } = await supabase.from("fundi_profiles").insert({
-        user_id: userId,
+        
+        // Professional Info
         skills: data.skills,
-        experience_years: parseInt(data.experience) || 0,
-        mpesa_number: data.mpesaNumber,
-        verification_status: "pending",
-        id_number: data.idNumber,
-        id_photo_url: data.idPhotoBase64 || data.idPhotoPreview || "",
-        selfie_url: data.selfiePhotoBase64 || data.selfiePhotoPreview || "",
-        latitude: data.latitude,
-        longitude: data.longitude,
-        gps_accuracy: data.accuracy,
-        gps_altitude: data.altitude,
-        location_display_name: data.locationDisplayName,
-        location_area: data.locationArea,
-        location_estate: data.locationEstate,
-        location_city: data.locationCity,
-      });
+        experience: data.experience,
+        mpesaNumber: data.mpesaNumber,
+      };
 
-      if (profileErr) throw profileErr;
+      // Submit using the backend handler
+      const result = await handleFundiSubmission(userId, registrationData);
 
-      toast.success("Registration submitted! Pending admin review.");
-      if (data.locationMismatchFlagged) {
-        toast.warning("Account flagged for manual review due to location mismatch.");
+      if (result.success) {
+        toast.success(result.message);
+        setTimeout(() => navigate("/auth"), 2000);
+      } else {
+        toast.error(result.message);
       }
-
-      setTimeout(() => navigate("/auth"), 2000);
     } catch (error) {
       console.error("Submission error:", error);
       const msg = error instanceof Error ? error.message : (typeof error === "object" ? JSON.stringify(error) : String(error));
@@ -1447,7 +1524,33 @@ const FundiRegister = () => {
               
               <div className="p-4 bg-blue-500/10 border-2 border-blue-500 rounded-lg mb-4">
                 <p className="font-medium text-foreground">📍 Set Your Exact Location</p>
-                <p className="text-sm text-muted-foreground mt-2">Click on the map below to mark your exact location. The system will save your coordinates.</p>
+                <p className="text-sm text-muted-foreground mt-2">Search for your address or click on the map to mark your exact location.</p>
+              </div>
+
+              <div className="mb-4">
+                <div className="flex gap-2">
+                  <input
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') searchLocation(); }}
+                    placeholder="Search address, place or landmark"
+                    className="flex-1 px-3 py-2 border rounded-lg bg-background text-foreground"
+                    aria-label="Search location"
+                  />
+                  <Button onClick={() => searchLocation()} disabled={searchLoading}>
+                    {searchLoading ? <Loader className="w-4 h-4 animate-spin mr-2" /> : null}
+                    Search
+                  </Button>
+                </div>
+                {searchResults.length > 0 && (
+                  <ul className="mt-2 max-h-48 overflow-auto rounded-lg border bg-card">
+                    {searchResults.map((r, i) => (
+                      <li key={i} className="p-2 hover:bg-muted/10 cursor-pointer" onClick={() => { setLocationFromCoords(r.lat, r.lon, 'map_click'); setSearchResults([]); setSearchQuery(''); }}>
+                        {r.display_name}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </div>
 
               {/* Map is ALWAYS visible - user clicks to set location */}
@@ -1475,6 +1578,31 @@ const FundiRegister = () => {
                   }}
                 />
               </div>
+
+                <div className="flex gap-3 mb-4">
+                  {typeof navigator !== 'undefined' && (navigator as any).geolocation ? (
+                    <Button onClick={captureLocation} disabled={loading} className="flex-1">
+                      {loading ? (
+                        <span className="flex items-center justify-center"><Loader className="w-4 h-4 mr-2 animate-spin" />Getting GPS…</span>
+                      ) : (
+                        <span className="flex items-center justify-center">Use Device GPS</span>
+                      )}
+                    </Button>
+                  ) : (
+                    <div className="flex-1 p-2 text-sm text-muted-foreground">Device GPS unavailable — click the map to set location.</div>
+                  )}
+
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setData((prev) => ({ ...prev, latitude: null, longitude: null, accuracy: null, locationDisplayName: "" }));
+                      setCoordsFromDevice(false);
+                      setUserAdjustedLocation(false);
+                    }}
+                  >
+                    Clear
+                  </Button>
+                </div>
 
               {/* Show info after location is set */}
               {data.latitude && data.longitude && (
@@ -1644,13 +1772,34 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
         if (canceled) return;
         const L = (window as any).L;
         if (!L) return;
-        // initialize map if not exists
+        // initialize map if not exists - use lower initial zoom to reduce tiles fetched,
+        // then zoom in after first tiles load for a faster perceived render
         if (!mapRef.current) {
-          mapRef.current = L.map('fundi-map', { center: [lat, lng], zoom: 18, scrollWheelZoom: true });
-          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          mapRef.current = L.map('fundi-map', {
+            center: [lat, lng],
+            zoom: 13,
+            scrollWheelZoom: true,
+            // prefer canvas for faster rendering on some devices
+            preferCanvas: true,
+          });
+
+          const tiles = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '© OpenStreetMap contributors',
+            updateWhenIdle: true,
+            reuseTiles: true,
+            detectRetina: false,
           }).addTo(mapRef.current);
+
+          // once initial tiles load, zoom in for a detailed view
+          tiles.on('load', () => {
+            try {
+              mapRef.current.invalidateSize();
+              mapRef.current.setView([lat, lng], 18);
+            } catch (e) {
+              // ignore
+            }
+          });
 
           // create a draggable marker so users can correct position
           markerRef.current = L.marker([lat, lng], { draggable: true })
@@ -1676,15 +1825,20 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
             }
           });
         } else {
-          mapRef.current.setView([lat, lng], 18);
-          if (markerRef.current) {
-            markerRef.current.setLatLng([lat, lng]).setPopupContent(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
-          } else {
-            markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current).bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
-            markerRef.current.on('dragend', function (ev: any) {
-              const pos = ev.target.getLatLng();
-              if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
-            });
+          // update view quickly without fetching too many tiles immediately
+          try {
+            mapRef.current.setView([lat, lng], 13);
+            if (markerRef.current) {
+              markerRef.current.setLatLng([lat, lng]).setPopupContent(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
+            } else {
+              markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current).bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
+              markerRef.current.on('dragend', function (ev: any) {
+                const pos = ev.target.getLatLng();
+                if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
+              });
+            }
+          } catch (e) {
+            // ignore
           }
         }
       } catch (e) {
