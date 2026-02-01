@@ -12,7 +12,8 @@ import {
   Settings,
   Wrench,
   ChevronRight,
-  AlertCircle
+  AlertCircle,
+  Trash2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -100,6 +101,30 @@ const Dashboard = () => {
       toast.error("Failed to load jobs");
     } finally {
       setJobsLoading(false);
+    }
+  };
+
+  // Cancel a job
+  const cancelJob = async (jobId: string) => {
+    if (!confirm("Are you sure you want to cancel this job?")) {
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from("jobs")
+        .update({ status: "cancelled" })
+        .eq("id", jobId)
+        .eq("customer_id", user?.id);
+
+      if (error) throw error;
+
+      // Remove from active jobs
+      setActiveJobs(activeJobs.filter((job) => job.id !== jobId));
+      toast.success("Job cancelled successfully");
+    } catch (error) {
+      console.error("Error cancelling job:", error);
+      toast.error("Failed to cancel job");
     }
   };
 
@@ -236,7 +261,16 @@ const Dashboard = () => {
                         <h3 className="font-semibold text-foreground">{job.title}</h3>
                         <p className="text-sm text-muted-foreground line-clamp-2">{job.description}</p>
                       </div>
-                      <ChevronRight className="w-5 h-5 text-muted-foreground" />
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={() => cancelJob(job.id)}
+                          className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
+                          title="Cancel job"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                        <ChevronRight className="w-5 h-5 text-muted-foreground" />
+                      </div>
                     </div>
 
                     {/* Job Details */}
