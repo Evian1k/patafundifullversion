@@ -1,3 +1,4 @@
+import { Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -28,7 +29,7 @@ interface JobData {
   id: string;
   title: string;
   description: string;
-  service_category: { name: string } | null;
+  service_categories: { name: string } | null;
   urgency: string;
   location: string;
   status: string;
@@ -351,7 +352,7 @@ const Dashboard = () => {
                     </div>
                   </div>
                   <span className="text-xs font-medium text-primary capitalize">
-                    {job.service_category?.name || job.urgency}
+                    {job.service_categories?.name || job.urgency}
                   </span>
                 </motion.div>
               ))}

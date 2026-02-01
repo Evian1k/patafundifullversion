@@ -10,7 +10,6 @@ import Dashboard from "./pages/Dashboard";
 import CreateJob from "./pages/CreateJob";
 import FundiRegister from "./pages/FundiRegister";
 import Settings from "./pages/Settings";
-import AdminFundiVerificationAI from "./pages/AdminFundiVerificationAI";
 import NotFound from "./pages/NotFound";
 
 const App = () => {
@@ -37,7 +36,6 @@ const App = () => {
             <Route path="/create-job" element={<CreateJob />} />
             <Route path="/fundi/register" element={<FundiRegister />} />
             <Route path="/settings" element={<Settings />} />
-            <Route path="/admin/verify-fundis" element={<AdminFundiVerificationAI />} />
 
             {/* Admin routes removed */}
 
