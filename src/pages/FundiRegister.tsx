@@ -1444,126 +1444,80 @@ const FundiRegister = () => {
           {step === 4 && (
             <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
               <h2 className="text-2xl font-bold text-foreground mb-6">GPS Location Verification</h2>
-              {!data.latitude && (
-                <>
-                  <div className="p-4 bg-blue-500/10 border-2 border-blue-500 rounded-lg mb-4">
-                    <p className="font-medium text-foreground">📍 Quick Location Setup</p>
-                    <p className="text-sm text-muted-foreground mt-2"><strong>Option 1 (Fast):</strong> Click "Load Map" below, then click on the map where you are. Done in 2 seconds.</p>
-                    <p className="text-sm text-muted-foreground mt-1"><strong>Option 2:</strong> Click "Use Device GPS" to auto-detect (slower, requires mobile).</p>
+              
+              <div className="p-4 bg-blue-500/10 border-2 border-blue-500 rounded-lg mb-4">
+                <p className="font-medium text-foreground">📍 Set Your Exact Location</p>
+                <p className="text-sm text-muted-foreground mt-2">Click on the map below to mark your exact location. The system will save your coordinates.</p>
+              </div>
+
+              {/* Map is ALWAYS visible - user clicks to set location */}
+              <div className="w-full h-96 rounded-lg border-2 border-border overflow-hidden relative mb-4">
+                <div id="fundi-map" className="w-full h-full" />
+                {!leafletLoaded && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-20">
+                    <div className="flex items-center gap-2 bg-black/60 text-white px-4 py-2 rounded">
+                      <Loader className="w-5 h-5 animate-spin" />
+                      <span>Loading map…</span>
+                    </div>
                   </div>
+                )}
+                <MapInitializer
+                  lat={data.latitude || -1.2865}
+                  lng={data.longitude || 36.8172}
+                  label={data.locationDisplayName || ""}
+                  onMapClick={(lat, lng) => {
+                    setLocationFromCoords(lat, lng, 'map_click');
+                  }}
+                  onMarkerChange={(lat, lng) => {
+                    setData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
+                    setUserAdjustedLocation(true);
+                    setCoordsFromDevice(false);
+                  }}
+                />
+              </div>
 
-                  {!leafletLoaded ? (
-                    <Button onClick={() => ensureLeafletLoaded().then(() => setLeafletLoaded(true))} disabled={loading} className="w-full mb-3" size="lg">
-                      <MapPin className="w-4 h-4 mr-2" />
-                      Load Map (Click to Set Location)
-                    </Button>
-                  ) : null}
-
-                  <Button onClick={captureLocation} disabled={loading} className="w-full" size="lg" variant="outline">
-                    {loading ? <Loader className="w-4 h-4 mr-2 animate-spin" /> : <MapPin className="w-4 h-4 mr-2" />}
-                    {loading ? "Getting GPS..." : "Use Device GPS"}
-                  </Button>
-                </>
-              )}
+              {/* Show info after location is set */}
               {data.latitude && data.longitude && (
-                <div className="space-y-4">
-                  {/* Interactive Map - Google Maps Embed (requires VITE_GOOGLE_MAPS_API_KEY). Falls back to OSM embed if not set. */}
-                  <div className="w-full h-96 rounded-lg border-2 border-border overflow-hidden relative">
-                    <div id="fundi-map" className="w-full h-full" />
-                    {!leafletLoaded && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-20">
-                        <div className="flex items-center gap-2 bg-black/60 text-white px-4 py-2 rounded">
-                          <Loader className="w-5 h-5 animate-spin" />
-                          <span>Loading map…</span>
-                        </div>
-                      </div>
-                    )}
-                    <MapInitializer
-                      lat={data.latitude}
-                      lng={data.longitude}
-                      label={data.locationDisplayName || ""}
-                      onMapClick={(lat, lng) => {
-                        setLocationFromCoords(lat, lng, 'map_click');
-                      }}
-                      onMarkerChange={(lat, lng) => {
-                        setData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
-                        setUserAdjustedLocation(true);
-                        setCoordsFromDevice(false);
-                      }}
-                    />
-                  </div>
-
-                  <p className="text-sm text-muted-foreground mt-2">Tip: Drag the marker or click the map to correct your exact position.</p>
-
-                  {userAdjustedLocation && !coordsFromDevice && (
-                    <div className="p-3 bg-warning/10 border-2 border-warning rounded-lg mt-3">
-                      <p className="font-medium text-foreground">Manual location adjustment detected</p>
-                      <p className="text-sm text-muted-foreground mt-1">You moved the marker manually. For verification we require the device GPS capture — please use the "Capture GPS Location" button on your device and avoid manual edits.</p>
-                    </div>
-                  )}
-
-                  {/* Coordinates Card */}
+                <div className="space-y-3">
                   <div className="p-4 bg-secondary rounded-lg border border-border">
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div>
-                        <p className="text-muted-foreground mb-1">Latitude</p>
-                        <p className="font-mono font-bold text-foreground">{data.latitude.toFixed(6)}°</p>
-                      </div>
-                      <div>
-                        <p className="text-muted-foreground mb-1">Longitude</p>
-                        <p className="font-mono font-bold text-foreground">{data.longitude.toFixed(6)}°</p>
-                      </div>
-                      <div>
-                        <p className="text-muted-foreground mb-1">Accuracy</p>
-                        <p className="font-mono font-bold text-foreground">±{data.accuracy?.toFixed(0)}m</p>
-                      </div>
-                      <div>
-                        <p className="text-muted-foreground mb-1">Altitude</p>
-                        <p className="font-mono font-bold text-foreground">Captured</p>
-                      </div>
+                    <p className="text-sm text-muted-foreground">Location Name</p>
+                    <p className="font-medium text-foreground">{data.locationDisplayName || "Click map to set"}</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="p-3 bg-secondary rounded-lg border border-border">
+                      <p className="text-xs text-muted-foreground mb-1">Latitude</p>
+                      <p className="font-mono font-bold">{data.latitude.toFixed(6)}°</p>
+                    </div>
+                    <div className="p-3 bg-secondary rounded-lg border border-border">
+                      <p className="text-xs text-muted-foreground mb-1">Longitude</p>
+                      <p className="font-mono font-bold">{data.longitude.toFixed(6)}°</p>
                     </div>
                   </div>
 
-                  {data.locationMismatchFlagged && (
-                    <div className="p-4 bg-destructive/10 border-2 border-destructive rounded-lg flex items-start gap-3">
-                      <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-medium text-foreground">⚠️ Location Not Verified</p>
-                        <p className="text-sm text-muted-foreground mt-1">{data.locationMismatchReason}</p>
-                        <p className="text-xs text-muted-foreground mt-2"><strong>Action:</strong> Use "Retake Location" button below. Move to an open outdoor area, ensure GPS is enabled on your phone, and capture again.</p>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Retake Location Button */}
                   <Button
-                    onClick={async () => {
+                    onClick={() => {
                       setData((prev) => ({
                         ...prev,
                         latitude: null,
                         longitude: null,
                         accuracy: null,
-                        altitude: null,
-                        capturedAt: 0,
                         locationDisplayName: "",
                         locationArea: "",
                         locationEstate: "",
                         locationCity: "",
-                        locationMismatchFlagged: false,
-                        locationMismatchReason: "",
                       }));
                       setCoordsFromDevice(false);
                       setUserAdjustedLocation(false);
-                      // trigger recapture immediately
-                      await captureLocation();
                     }}
                     variant="outline"
                     className="w-full"
                   >
-                    🔄 Retake Location (move to open area first)
+                    🔄 Change Location (click map again)
                   </Button>
                 </div>
               )}
+
               <div className="flex gap-4 mt-8">
                 <Button onClick={() => setStep(3)} variant="outline" className="flex-1">
                   <ArrowLeft className="w-4 h-4 mr-2" />
