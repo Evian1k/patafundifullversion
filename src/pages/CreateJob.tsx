@@ -161,10 +161,41 @@ const CreateJob = () => {
   const reverseGeocode = async (latitude: number, longitude: number): Promise<string> => {
     try {
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`
       );
       const data = await response.json();
-      return data.address?.road || data.address?.city || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+      const address = data.address || {};
+      
+      // Build a human-readable address from available components
+      const parts = [];
+      
+      // Try to get street address
+      if (address.road) parts.push(address.road);
+      if (address.house_number) parts[0] = (address.house_number + ' ' + (address.road || '')).trim();
+      
+      // Get suburb/neighbourhood
+      if (address.suburb) parts.push(address.suburb);
+      else if (address.neighbourhood) parts.push(address.neighbourhood);
+      else if (address.village) parts.push(address.village);
+      
+      // Get city
+      if (address.city) parts.push(address.city);
+      else if (address.town) parts.push(address.town);
+      
+      // If we have meaningful parts, join them
+      if (parts.length > 0) {
+        return parts.join(', ').replace(/\s+/g, ' ').trim();
+      }
+      
+      // Fallback to display_name if available
+      if (data.display_name) {
+        // Take just the first 2-3 parts of the full address for brevity
+        const displayParts = data.display_name.split(',').slice(0, 2);
+        return displayParts.join(',').trim();
+      }
+      
+      // Final fallback to coordinates
+      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
     } catch (error) {
       console.error('Reverse geocoding error:', error);
       return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
