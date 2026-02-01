@@ -1,3 +1,4 @@
+import { useState, useEffect, useRef } from "react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -502,6 +503,7 @@ const FundiRegister = () => {
 
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
+  const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
   const [faceDetected, setFaceDetected] = useState(false);
   const [detectionCountdown, setDetectionCountdown] = useState(0);
@@ -512,6 +514,9 @@ const FundiRegister = () => {
   const [cameraCountdown, setCameraCountdown] = useState(0);
   const [ocrDebugInfo, setOcrDebugInfo] = useState<OCRParseResult | null>(null);
   const [verificationResult, setVerificationResult] = useState<VerificationResult | null>(null);
+  const [geoPermission, setGeoPermission] = useState<string | null>(null);
+  const [coordsFromDevice, setCoordsFromDevice] = useState(false);
+  const [userAdjustedLocation, setUserAdjustedLocation] = useState(false);
 
   const [verificationSteps, setVerificationSteps] = useState<VerificationStep[]>([
     { name: "Personal Info", completed: false, status: "pending" },
@@ -542,6 +547,11 @@ const FundiRegister = () => {
     latitude: null,
     longitude: null,
     accuracy: null,
+    altitude: null,
+    locationDisplayName: "",
+    locationArea: "",
+    locationEstate: "",
+    locationCity: "",
     capturedAt: 0,
     locationMismatchFlagged: false,
     locationMismatchReason: "",
@@ -549,6 +559,28 @@ const FundiRegister = () => {
     experience: "",
     mpesaNumber: "",
   });
+
+  const locationAutoCapturedRef = useRef(false);
+
+  // Auto-capture location when user reaches Step 4 (first time)
+  useEffect(() => {
+    if (step === 4 && !locationAutoCapturedRef.current) {
+      locationAutoCapturedRef.current = true;
+      // only auto-capture if no coordinates yet
+      if (!data.latitude || !data.longitude) {
+        // start loading Leaflet early so map is ready when coords arrive
+        ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
+        captureLocation();
+      }
+    }
+  }, [step]);
+
+  // preload leaflet when user navigates to step 4 (also allow manual preload)
+  useEffect(() => {
+    if (step === 4 && !leafletLoaded) {
+      ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
+    }
+  }, [step, leafletLoaded]);
 
   // Validation functions
   const validateStep1 = (): boolean => {
@@ -596,6 +628,52 @@ const FundiRegister = () => {
       toast.error("Error validating information");
     } finally {
       setLoading(false);
+    }
+  };
+
+  // reverse geocode helper: prefer Google Maps Geocoding API if key present, otherwise fallback to OSM Nominatim
+  const reverseGeocodeLocation = async (lat: number, lng: number) => {
+    const key = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+    if (key) {
+      try {
+        const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?latlng=${lat},${lng}&key=${key}`);
+        if (!res.ok) throw new Error("Google geocode failed");
+        const json = await res.json();
+        const result = json.results && json.results[0];
+        if (!result) throw new Error("No geocode results");
+        const comp = (result.address_components || []);
+        const find = (type: string) => {
+          const c = comp.find((c: any) => (c.types || []).includes(type));
+          return c ? c.long_name : null;
+        };
+        return {
+          displayName: result.formatted_address,
+          area: find("neighborhood") || find("sublocality") || find("administrative_area_level_3") || "",
+          estate: find("sublocality_level_1") || find("sublocality") || "",
+          city: find("locality") || find("administrative_area_level_2") || "",
+        };
+      } catch (e) {
+        console.warn("Google reverse geocode failed, falling back", e);
+      }
+    }
+
+    // fallback to OSM Nominatim
+    try {
+      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=16&addressdetails=1`, {
+        headers: { Accept: "application/json", "User-Agent": "FixitConnect-Verification/1.0" },
+      });
+      if (!r.ok) throw new Error("Nominatim failed");
+      const j = await r.json();
+      const addr = j.address || {};
+      return {
+        displayName: j.display_name || "",
+        area: addr.suburb || addr.neighbourhood || addr.village || "",
+        estate: addr.hamlet || addr.residential || addr.estate || "",
+        city: addr.city || addr.town || addr.county || "",
+      };
+    } catch (e) {
+      console.warn("Fallback geocode failed", e);
+      return { displayName: `${lat.toFixed(4)}, ${lng.toFixed(4)}`, area: "", estate: "", city: "" };
     }
   };
 
@@ -897,25 +975,66 @@ const FundiRegister = () => {
     toast.success("Selfie uploaded");
   };
 
+  // Helper: Check geolocation permission state
+  const checkGeolocationPermission = async (): Promise<string | null> => {
+    if (!(navigator as any).permissions) {
+      setGeoPermission(null);
+      return null;
+    }
+    try {
+      const p = await (navigator as any).permissions.query({ name: 'geolocation' });
+      setGeoPermission(p.state);
+      p.onchange = () => setGeoPermission(p.state);
+      return p.state;
+    } catch (e) {
+      setGeoPermission(null);
+      return null;
+    }
+  };
+
   // Step 4: GPS Location
   const captureLocation = async () => {
     if (!navigator.geolocation) {
-      toast.error("Geolocation unavailable");
+      toast.error("Geolocation unavailable — must use a mobile device with GPS");
       return;
     }
 
+    // check permission before attempting capture
+    const perm = await checkGeolocationPermission();
+    if (perm === 'denied') {
+      toast.error('Location access denied. Enable location for this site in your browser and device settings.');
+      return;
+    }
+
+    // start loading Leaflet in parallel to speed up map render
+    ensureLeafletLoaded().then(() => setLeafletLoaded(true)).catch(() => {});
+
     setLoading(true);
+    const toastId = toast.loading("Capturing GPS location from device (must use mobile)...");
     try {
       const position = await new Promise<GeolocationPosition>((resolve, reject) => {
         navigator.geolocation.getCurrentPosition(resolve, reject, {
           enableHighAccuracy: true,
-          timeout: 10000,
+          timeout: 30000,
+          maximumAge: 0,  // Force fresh capture, don't use cached location
         });
       });
 
-      const { latitude, longitude, accuracy } = position.coords;
+      const { latitude, longitude, accuracy, altitude } = position.coords;
+      
+      // Detect if location is from real GPS or IP-based/cached
+      // Real GPS: accuracy typically ≤ 50m; IP/cached: typically > 100m
+      const isLikelyRealGPS = accuracy !== null && accuracy <= 50;
+      const isLikelyCachedOrIP = accuracy !== null && accuracy > 100;
+      
       let flagged = false;
       let reason = "";
+
+      // If accuracy is poor, warn user
+      if (isLikelyCachedOrIP) {
+        flagged = true;
+        reason = `Poor GPS accuracy (±${accuracy.toFixed(0)}m). This may be cached/IP-based location, not real GPS. Move to open area outdoors and retake. Or use a different mobile device.`;
+      }
 
       try {
         const ipResponse = await fetch("https://ipapi.co/json/");
@@ -923,10 +1042,25 @@ const FundiRegister = () => {
         if (ipData.country_name && ipData.country_name !== "Kenya" && 
             (latitude < -15 || latitude > 15)) {
           flagged = true;
-          reason = `IP location (${ipData.country_name}) doesn't match GPS location`;
+          reason = `IP location (${ipData.country_name}) doesn't match GPS. Using wrong device or location spoofing detected.`;
         }
       } catch (e) {
         console.log("IP check skipped");
+      }
+
+      // reverse geocode (prefer Google if API key available)
+      let displayName = "";
+      let area = "";
+      let estate = "";
+      let city = "";
+      try {
+        const geocoded = await reverseGeocodeLocation(latitude, longitude);
+        displayName = geocoded.displayName || "";
+        area = geocoded.area || "";
+        estate = geocoded.estate || "";
+        city = geocoded.city || "";
+      } catch (e) {
+        console.warn("Reverse geocode failed", e);
       }
 
       setData((prev) => ({
@@ -934,15 +1068,42 @@ const FundiRegister = () => {
         latitude,
         longitude,
         accuracy,
+        altitude: altitude ?? null,
+        locationDisplayName: displayName,
+        locationArea: area,
+        locationEstate: estate,
+        locationCity: city,
         capturedAt: Date.now(),
         locationMismatchFlagged: flagged,
         locationMismatchReason: reason,
       }));
 
-      if (flagged) toast.warning(`Location flagged for review: ${reason}`);
-      else toast.success("Location verified");
-    } catch {
-      toast.error("Location capture failed. Ensure permissions granted.");
+      // mark these coords as device-captured and clear any manual adjustments
+      setCoordsFromDevice(true);
+      setUserAdjustedLocation(false);
+
+      toast.dismiss(toastId);
+      if (flagged) {
+        toast.warning(`⚠️ ${reason}`, { duration: 5000 });
+      } else if (isLikelyRealGPS) {
+        toast.success(`✓ Real GPS captured (accuracy: ±${accuracy.toFixed(0)}m)`);
+      } else {
+        toast.success("Location captured");
+      }
+    } catch (err: any) {
+      console.error('captureLocation error', err);
+      toast.dismiss(toastId);
+      
+      // Distinguish between different error types
+      if (err.code === 1) {
+        toast.error("Permission denied. Enable location in browser/device settings.");
+      } else if (err.code === 2) {
+        toast.error("GPS unavailable — move to open area outdoors, or use a different mobile device.");
+      } else if (err.code === 3) {
+        toast.error("Location timeout. Move to open area outdoors and ensure GPS is enabled on your device.");
+      } else {
+        toast.error("Location capture failed. Must use mobile device with GPS enabled.");
+      }
     } finally {
       setLoading(false);
     }
@@ -953,6 +1114,12 @@ const FundiRegister = () => {
       toast.error("GPS location required");
       return;
     }
+
+    if (data.locationMismatchFlagged) {
+      toast.error("Please fix location issues (retake with real GPS). " + data.locationMismatchReason);
+      return;
+    }
+
     setStep(5);
     updateVerificationStep(3, "approved");
     updateVerificationStep(4, "in_progress");
@@ -995,6 +1162,14 @@ const FundiRegister = () => {
         id_number: data.idNumber,
         id_photo_url: data.idPhotoBase64 || data.idPhotoPreview || "",
         selfie_url: data.selfiePhotoBase64 || data.selfiePhotoPreview || "",
+        latitude: data.latitude,
+        longitude: data.longitude,
+        gps_accuracy: data.accuracy,
+        gps_altitude: data.altitude,
+        location_display_name: data.locationDisplayName,
+        location_area: data.locationArea,
+        location_estate: data.locationEstate,
+        location_city: data.locationCity,
       });
 
       if (profileErr) throw profileErr;
@@ -1176,6 +1351,12 @@ const FundiRegister = () => {
                       <X className="w-4 h-4" />
                     </button>
                   </div>
+
+                  {/* Resolved Location Name */}
+                  <div className="p-3 bg-secondary rounded-lg border border-border">
+                    <p className="text-xs text-muted-foreground mb-1">Resolved Location</p>
+                    <p className="font-medium text-foreground">{data.locationDisplayName || [data.locationArea, data.locationEstate, data.locationCity].filter(Boolean).join(", ") || "(unnamed location)"}</p>
+                  </div>
                   
                   {/* Debug Information for Admins - Only show on error */}
                   {data.extractedIdName && (
@@ -1327,25 +1508,58 @@ const FundiRegister = () => {
             <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
               <h2 className="text-2xl font-bold text-foreground mb-6">GPS Location Verification</h2>
               {!data.latitude && (
-                <Button onClick={captureLocation} disabled={loading} className="w-full" size="lg">
-                  {loading ? <Loader className="w-4 h-4 mr-2 animate-spin" /> : <MapPin className="w-4 h-4 mr-2" />}
-                  {loading ? "Capturing..." : "Capture GPS Location"}
-                </Button>
+                <>
+                  <div className="p-4 bg-info/10 border-2 border-info rounded-lg mb-4">
+                    <p className="font-medium text-foreground">📱 Mobile GPS Required</p>
+                    <p className="text-sm text-muted-foreground mt-2">For accurate location: <strong>Use a mobile phone</strong> (not desktop). Enable location in phone settings (High Accuracy mode). Move to an open outdoor area away from tall buildings. Click the button below and allow location when prompted.</p>
+                  </div>
+
+                  {geoPermission === 'denied' ? (
+                    <div className="p-3 bg-destructive/10 border-2 border-destructive rounded-lg mb-4">
+                      <p className="font-medium text-foreground">Location access blocked</p>
+                      <p className="text-sm text-muted-foreground mt-1">Clear browser site data or allow location in browser/device settings, then try again.</p>
+                    </div>
+                  ) : null}
+
+                  <Button onClick={captureLocation} disabled={loading} className="w-full" size="lg">
+                    {loading ? <Loader className="w-4 h-4 mr-2 animate-spin" /> : <MapPin className="w-4 h-4 mr-2" />}
+                    {loading ? "Capturing..." : "Capture GPS Location from Mobile"}
+                  </Button>
+                </>
               )}
               {data.latitude && data.longitude && (
                 <div className="space-y-4">
-                  {/* Google Maps Static Image */}
-                  <div className="w-full h-96 rounded-lg border-2 border-border overflow-hidden">
-                    <img
-                      src={`https://maps.googleapis.com/maps/api/staticmap?center=${data.latitude},${data.longitude}&zoom=15&size=600x400&markers=color:red%7C${data.latitude},${data.longitude}&key=AIzaSyA_example_key`}
-                      alt="Location Map"
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        // Fallback: show OpenStreetMap static image if Google Maps fails
-                        (e.target as HTMLImageElement).src = `https://tile.openstreetmap.org/15/${Math.floor((data.longitude + 180) / 360 * Math.pow(2, 15))}/${Math.floor((1 - Math.log(Math.tan(data.latitude * Math.PI / 180) + 1 / Math.cos(data.latitude * Math.PI / 180)) / Math.PI) / 2 * Math.pow(2, 15))}.png`;
+                  {/* Interactive Map - Google Maps Embed (requires VITE_GOOGLE_MAPS_API_KEY). Falls back to OSM embed if not set. */}
+                  <div className="w-full h-96 rounded-lg border-2 border-border overflow-hidden relative">
+                    <div id="fundi-map" className="w-full h-full" />
+                    {!leafletLoaded && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-20">
+                        <div className="flex items-center gap-2 bg-black/60 text-white px-4 py-2 rounded">
+                          <Loader className="w-5 h-5 animate-spin" />
+                          <span>Loading map…</span>
+                        </div>
+                      </div>
+                    )}
+                    <MapInitializer
+                      lat={data.latitude}
+                      lng={data.longitude}
+                      label={data.locationDisplayName || ""}
+                      onMarkerChange={(lat, lng) => {
+                        setData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
+                        setUserAdjustedLocation(true);
+                        setCoordsFromDevice(false);
                       }}
                     />
                   </div>
+
+                  <p className="text-sm text-muted-foreground mt-2">Tip: Drag the marker or click the map to correct your exact position.</p>
+
+                  {userAdjustedLocation && !coordsFromDevice && (
+                    <div className="p-3 bg-warning/10 border-2 border-warning rounded-lg mt-3">
+                      <p className="font-medium text-foreground">Manual location adjustment detected</p>
+                      <p className="text-sm text-muted-foreground mt-1">You moved the marker manually. For verification we require the device GPS capture — please use the "Capture GPS Location" button on your device and avoid manual edits.</p>
+                    </div>
+                  )}
 
                   {/* Coordinates Card */}
                   <div className="p-4 bg-secondary rounded-lg border border-border">
@@ -1370,43 +1584,53 @@ const FundiRegister = () => {
                   </div>
 
                   {/* Accuracy Warning */}
-                  {data.accuracy && data.accuracy > 1000 && (
+                  {data.accuracy && data.accuracy > 100 && (
                     <div className="p-4 bg-warning/10 border-2 border-warning rounded-lg flex items-start gap-3">
                       <AlertCircle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
                       <div>
                         <p className="font-medium text-foreground">Low GPS Accuracy</p>
-                        <p className="text-sm text-muted-foreground mt-1">Accuracy is {(data.accuracy / 1000).toFixed(1)}km. Try in an open area with clear sky view for better accuracy.</p>
+                        <p className="text-sm text-muted-foreground mt-1">Low GPS accuracy. Please move to an open area and try again.</p>
                       </div>
                     </div>
                   )}
 
                   {data.locationMismatchFlagged && (
-                    <div className="p-4 bg-warning/10 border-2 border-warning rounded-lg flex items-start gap-3">
-                      <AlertCircle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
+                    <div className="p-4 bg-destructive/10 border-2 border-destructive rounded-lg flex items-start gap-3">
+                      <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />
                       <div>
-                        <p className="font-medium text-foreground">Location Flagged</p>
+                        <p className="font-medium text-foreground">⚠️ Location Not Verified</p>
                         <p className="text-sm text-muted-foreground mt-1">{data.locationMismatchReason}</p>
+                        <p className="text-xs text-muted-foreground mt-2"><strong>Action:</strong> Use "Retake Location" button below. Move to an open outdoor area, ensure GPS is enabled on your phone, and capture again.</p>
                       </div>
                     </div>
                   )}
 
                   {/* Retake Location Button */}
                   <Button
-                    onClick={() => {
+                    onClick={async () => {
                       setData((prev) => ({
                         ...prev,
                         latitude: null,
                         longitude: null,
                         accuracy: null,
+                        altitude: null,
                         capturedAt: 0,
+                        locationDisplayName: "",
+                        locationArea: "",
+                        locationEstate: "",
+                        locationCity: "",
                         locationMismatchFlagged: false,
                         locationMismatchReason: "",
                       }));
+                      setCoordsFromDevice(false);
+                      setUserAdjustedLocation(false);
+                      // trigger recapture immediately
+                      await captureLocation();
                     }}
                     variant="outline"
                     className="w-full"
                   >
-                    Retake Location
+                    🔄 Retake Location (move to open area first)
                   </Button>
                 </div>
               )}
@@ -1415,8 +1639,13 @@ const FundiRegister = () => {
                   <ArrowLeft className="w-4 h-4 mr-2" />
                   Back
                 </Button>
-                <Button onClick={handleStep4Next} disabled={!data.latitude} className="flex-1">
-                  Continue <ArrowRight className="w-4 h-4 ml-2" />
+                <Button 
+                  onClick={handleStep4Next} 
+                  disabled={!data.latitude || (data.locationMismatchFlagged && !coordsFromDevice)}
+                  className="flex-1"
+                >
+                  {!data.latitude ? "Capture location first" : data.locationMismatchFlagged ? "Fix location issues" : "Continue"}
+                  {!data.latitude || (data.locationMismatchFlagged && !coordsFromDevice) ? null : <ArrowRight className="w-4 h-4 ml-2" />}
                 </Button>
               </div>
             </motion.div>
@@ -1495,5 +1724,103 @@ const FundiRegister = () => {
     </div>
   );
 };
+
+// Leaflet dynamic loader and map init using free OpenStreetMap tiles
+const ensureLeafletLoaded = async (): Promise<void> => {
+  if ((window as any).L) return;
+  // Load CSS
+  if (!document.querySelector('link[data-leaflet]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css';
+    link.setAttribute('data-leaflet', '1');
+    document.head.appendChild(link);
+  }
+  // Load script
+  if (!document.querySelector('script[data-leaflet]')) {
+    await new Promise<void>((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = 'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js';
+      s.async = true;
+      s.setAttribute('data-leaflet', '1');
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error('Failed to load Leaflet'));
+      document.head.appendChild(s);
+    });
+  }
+};
+
+const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMarkerChange?: (lat: number, lng: number) => void }> = ({ lat, lng, label, onMarkerChange }) => {
+  const mapRef = useRef<any>(null);
+  const markerRef = useRef<any>(null);
+  useEffect(() => {
+    let canceled = false;
+    const init = async () => {
+      try {
+        await ensureLeafletLoaded();
+        if (canceled) return;
+        const L = (window as any).L;
+        if (!L) return;
+        // initialize map if not exists
+        if (!mapRef.current) {
+          mapRef.current = L.map('fundi-map', { center: [lat, lng], zoom: 18, scrollWheelZoom: true });
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '© OpenStreetMap contributors',
+          }).addTo(mapRef.current);
+
+          // create a draggable marker so users can correct position
+          markerRef.current = L.marker([lat, lng], { draggable: true })
+            .addTo(mapRef.current)
+            .bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`)
+            .openPopup();
+
+          // when user drags marker, update parent state via callback
+          markerRef.current.on('dragend', function (ev: any) {
+            const pos = ev.target.getLatLng();
+            if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
+          });
+
+          // allow clicking on map to move marker
+          mapRef.current.on('click', function (e: any) {
+            const { lat: clickedLat, lng: clickedLng } = e.latlng;
+            if (markerRef.current) markerRef.current.setLatLng([clickedLat, clickedLng]).openPopup();
+            mapRef.current.setView([clickedLat, clickedLng]);
+            if (onMarkerChange) onMarkerChange(clickedLat, clickedLng);
+          });
+        } else {
+          mapRef.current.setView([lat, lng], 18);
+          if (markerRef.current) {
+            markerRef.current.setLatLng([lat, lng]).setPopupContent(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
+          } else {
+            markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current).bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
+            markerRef.current.on('dragend', function (ev: any) {
+              const pos = ev.target.getLatLng();
+              if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
+            });
+          }
+        }
+      } catch (e) {
+        console.warn('Leaflet init error', e);
+      }
+    };
+    init();
+    return () => {
+      canceled = true;
+      try {
+        if (mapRef.current) {
+          mapRef.current.remove();
+          mapRef.current = null;
+          markerRef.current = null;
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+  }, [lat, lng, label]);
+
+  return null;
+};
+
 
 export default FundiRegister;
