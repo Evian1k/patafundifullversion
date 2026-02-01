@@ -18,12 +18,45 @@ import {
   PaintBucket,
   CheckCircle,
   X,
-  Loader
+  Loader,
+  Navigation2
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Header from "@/components/layout/Header";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
+
+// Type definitions
+interface LeafletMap {
+  setView: (coords: [number, number], zoom: number) => LeafletMap;
+  remove: () => void;
+}
+
+interface LeafletMarker {
+  addTo: (map: LeafletMap) => LeafletMarker;
+}
+
+interface TileLayer {
+  addTo: (map: LeafletMap) => TileLayer;
+}
+
+interface LocationSearchResult {
+  lat: string;
+  lon: string;
+  name?: string;
+  display_name: string;
+}
+
+// Extend Window interface for Leaflet
+declare global {
+  interface Window {
+    L: {
+      map: (element: HTMLElement) => LeafletMap;
+      tileLayer: (url: string, options: any) => TileLayer;
+      marker: (coords: [number, number]) => LeafletMarker;
+    };
+  }
+}
 
 interface Service {
   id: string;
@@ -45,6 +78,7 @@ interface JobData {
   location: string;
   latitude?: number;
   longitude?: number;
+  locationName?: string;
   photos: PhotoData[];
 }
 
@@ -73,6 +107,11 @@ const CreateJob = () => {
   const [loading, setLoading] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [geoLoading, setGeoLoading] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<LocationSearchResult[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const mapRef = useRef<HTMLDivElement>(null);
+  const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [jobData, setJobData] = useState<JobData>({
     service: searchParams.get("service") || "",
     problem: searchParams.get("problem") || "",
@@ -81,6 +120,7 @@ const CreateJob = () => {
     location: "",
     latitude: undefined,
     longitude: undefined,
+    locationName: "",
     photos: [] as PhotoData[],
   });
   const [user, setUser] = useState<{ id?: string; user_metadata?: { full_name?: string } } | null>(null);
@@ -97,6 +137,117 @@ const CreateJob = () => {
     return () => subscription.unsubscribe();
   }, []);
 
+  // Preload Leaflet
+  useEffect(() => {
+    const loadLeaflet = async () => {
+      if (typeof window !== 'undefined' && !window.L) {
+        const link = document.createElement('link');
+        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+        link.rel = 'stylesheet';
+        document.head.appendChild(link);
+
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+        script.onload = () => setLeafletLoaded(true);
+        document.body.appendChild(script);
+      } else {
+        setLeafletLoaded(true);
+      }
+    };
+    loadLeaflet();
+  }, []);
+
+  // Reverse geocode function
+  const reverseGeocode = async (latitude: number, longitude: number): Promise<string> => {
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`
+      );
+      const data = await response.json();
+      return data.address?.road || data.address?.city || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+    } catch (error) {
+      console.error('Reverse geocoding error:', error);
+      return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+    }
+  };
+
+  // Search location function
+  const searchLocation = async (query: string) => {
+    if (!query.trim()) {
+      setSearchResults([]);
+      return;
+    }
+    
+    setSearchLoading(true);
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5`
+      );
+      const data = await response.json();
+      setSearchResults(data);
+    } catch (error) {
+      console.error('Location search error:', error);
+      setSearchResults([]);
+    } finally {
+      setSearchLoading(false);
+    }
+  };
+
+  // Select location from search results
+  const selectLocation = async (result: LocationSearchResult) => {
+    const latitude = parseFloat(result.lat);
+    const longitude = parseFloat(result.lon);
+    
+    setJobData((prev) => ({
+      ...prev,
+      latitude,
+      longitude,
+      location: result.display_name,
+      locationName: result.display_name,
+    }));
+    
+    setSearchQuery(result.display_name);
+    setSearchResults([]);
+    
+    // Initialize map if Leaflet is loaded
+    if (leafletLoaded && mapRef.current) {
+      initializeMap(latitude, longitude);
+    }
+  };
+
+  // Initialize map
+  const initializeMap = (latitude: number, longitude: number) => {
+    if (typeof window === 'undefined' || !window.L || !mapRef.current) return;
+    
+    // Remove existing map if it exists
+    const mapElement = mapRef.current as any;
+    if (mapElement._leaflet_map) {
+      mapElement._leaflet_map.remove();
+    }
+
+    const map = window.L.map(mapRef.current).setView([latitude, longitude], 13);
+    
+    window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '© OpenStreetMap contributors',
+      maxZoom: 19,
+    }).addTo(map);
+    
+    window.L.marker([latitude, longitude]).addTo(map);
+    
+    mapElement._leaflet_map = map;
+  };
+
+  // Map initialization effect
+  useEffect(() => {
+    if (step === 3 && jobData.latitude !== undefined && jobData.longitude !== undefined && leafletLoaded) {
+      setTimeout(() => {
+        if (jobData.latitude !== undefined && jobData.longitude !== undefined) {
+          initializeMap(jobData.latitude, jobData.longitude);
+        }
+      }, 100);
+    }
+  }, [step, leafletLoaded, jobData.latitude, jobData.longitude]);
+
   // Get user's current location via GPS
   const captureLocation = async () => {
     if (!navigator.geolocation) {
@@ -107,21 +258,36 @@ const CreateJob = () => {
     setGeoLoading(true);
     try {
       const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject);
+        navigator.geolocation.getCurrentPosition(
+          resolve,
+          reject,
+          {
+            enableHighAccuracy: true,
+            timeout: 15000,
+            maximumAge: 0,
+          }
+        );
       });
 
       const { latitude, longitude } = position.coords;
+      
+      // Reverse geocode to get location name
+      const locationName = await reverseGeocode(latitude, longitude);
+      
       setJobData((prev) => ({
         ...prev,
         latitude,
         longitude,
+        location: locationName,
+        locationName,
       }));
-
-      // Reverse geocode to get address (optional - using basic coords format)
-      setJobData((prev) => ({
-        ...prev,
-        location: `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`,
-      }));
+      
+      setSearchQuery(locationName);
+      
+      // Initialize map if Leaflet is loaded
+      if (leafletLoaded && mapRef.current) {
+        initializeMap(latitude, longitude);
+      }
 
       toast.success("Location captured!");
     } catch (error) {
@@ -301,10 +467,9 @@ const CreateJob = () => {
                   </div>
                   {index < steps.length - 1 && (
                     <div
-                      className={`w-full h-1 mx-2 rounded ${
+                      className={`w-[60px] h-1 mx-2 rounded ${
                         step > s.number ? "bg-primary" : "bg-muted"
                       }`}
-                      style={{ width: "60px" }}
                     />
                   )}
                 </div>
@@ -489,19 +654,22 @@ const CreateJob = () => {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-foreground mb-2">
+                    <label htmlFor="service-location" className="block text-sm font-medium text-foreground mb-2">
                       Service Location
                     </label>
                     <div className="space-y-2">
                       <div className="relative flex gap-2">
                         <div className="relative flex-1">
-                          <MapPin className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-muted-foreground" />
                           <input
+                            id="service-location"
                             type="text"
-                            placeholder="Enter your address"
-                            value={jobData.location}
-                            onChange={(e) => setJobData({ ...jobData, location: e.target.value })}
-                            className="w-full h-12 pl-12 pr-4 bg-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
+                            placeholder="Search address or enter location..."
+                            value={searchQuery || jobData.location}
+                            onChange={(e) => {
+                              setSearchQuery(e.target.value);
+                              searchLocation(e.target.value);
+                            }}
+                            className="w-full h-12 pl-4 pr-4 bg-background border border-border rounded-xl focus:outline-none focus:ring-2 focus:ring-primary/50 focus:border-primary transition-all"
                           />
                         </div>
                         <Button
@@ -510,21 +678,60 @@ const CreateJob = () => {
                           onClick={captureLocation}
                           disabled={geoLoading}
                           className="px-4"
+                          title="Use current GPS location"
+                          aria-label="Get current location using GPS"
                         >
                           {geoLoading ? (
                             <Loader className="w-4 h-4 animate-spin" />
                           ) : (
-                            <>
-                              <MapPin className="w-4 h-4" />
-                              GPS
-                            </>
+                            <Navigation2 className="w-4 h-4" />
                           )}
                         </Button>
                       </div>
-                      {jobData.latitude && jobData.longitude && (
-                        <p className="text-xs text-muted-foreground">
-                          📍 Coordinates: {jobData.latitude.toFixed(4)}, {jobData.longitude.toFixed(4)}
+                      
+                      {/* Search Results Dropdown */}
+                      {searchResults.length > 0 && (
+                        <div className="absolute top-full left-0 right-12 mt-1 bg-background border border-border rounded-xl shadow-lg z-50 max-h-48 overflow-y-auto">
+                          {searchResults.map((result, index) => (
+                            <button
+                              key={index}
+                              onClick={() => selectLocation(result)}
+                              className="w-full text-left px-4 py-2 hover:bg-muted/50 transition-colors border-b border-border/50 last:border-b-0"
+                              type="button"
+                              title={`Select ${result.display_name}`}
+                            >
+                              <p className="text-sm font-medium text-foreground">{result.name || result.display_name.split(',')[0]}</p>
+                              <p className="text-xs text-muted-foreground truncate">{result.display_name}</p>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                      
+                      {searchLoading && (
+                        <p className="text-xs text-muted-foreground flex items-center gap-2">
+                          <Loader className="w-3 h-3 animate-spin" /> Searching...
                         </p>
+                      )}
+                      
+                      {jobData.latitude && jobData.longitude && (
+                        <>
+                          <p className="text-xs text-muted-foreground">
+                            📍 {jobData.locationName || jobData.location}
+                          </p>
+                          <p className="text-xs text-muted-foreground">
+                            Coordinates: {jobData.latitude.toFixed(4)}, {jobData.longitude.toFixed(4)}
+                          </p>
+                          
+                          {/* Map Display */}
+                          {leafletLoaded && (
+                            <div className="mt-3 rounded-xl overflow-hidden border border-border">
+                              <div
+                                ref={mapRef}
+                                className="w-full h-[250px] bg-muted"
+                              />
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
