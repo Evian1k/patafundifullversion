@@ -13,7 +13,8 @@ import {
   Wrench,
   ChevronRight,
   AlertCircle,
-  Trash2
+  Trash2,
+  Zap
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/integrations/supabase/client";
@@ -158,6 +159,14 @@ const Dashboard = () => {
             </Link>
 
             <div className="flex items-center gap-3">
+              <Button 
+                variant="ghost" 
+                size="icon"
+                onClick={() => navigate("/admin/verify-fundis")}
+                title="AI Fundi Verification"
+              >
+                <Zap className="w-5 h-5" />
+              </Button>
               <Button 
                 variant="ghost" 
                 size="icon"

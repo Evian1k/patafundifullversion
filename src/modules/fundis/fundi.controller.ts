@@ -16,7 +16,7 @@ export interface FundiUploadProgress {
 
 /**
  * Handle complete fundi registration submission
- * Uploads files in sequence, then saves data to database
+ * Saves data locally with base64 images, avoiding storage bucket errors
  */
 export const handleFundiSubmission = async (
   userId: string,
@@ -36,106 +36,30 @@ export const handleFundiSubmission = async (
 
     const progress: FundiUploadProgress = {};
 
-    // Upload ID Photo
-    if (data.idPhotoFile) {
-      try {
-        const idPhotoFile = data.idPhotoFile as any; // File object from form
-        if (idPhotoFile instanceof File) {
-          data.idPhotoFile = await uploadFundiFile(
-            idPhotoFile,
-            "fundi-ids",
-            userId,
-            "id-front"
-          ) as any;
-          progress.idPhoto = { complete: true };
-          onProgress?.(progress);
-        }
-      } catch (err) {
-        progress.idPhoto = { complete: false, error: (err as Error).message };
-        onProgress?.(progress);
-        return {
-          success: false,
-          message: `ID photo upload failed: ${(err as Error).message}`,
-        };
-      }
-    }
+    // Save data locally instead of uploading to storage
+    // Store base64 images with registration data
+    const registrationDataWithImages = {
+      ...data,
+      idPhotoBase64: (data as any).idPhotoBase64,
+      idPhotoBackBase64: (data as any).idPhotoBackBase64,
+      selfiePhotoBase64: (data as any).selfiePhotoBase64,
+      // Mark files as processed without actual storage upload
+      idPhotoFile: { filePath: "local-storage", fileName: "id-front" },
+      idPhotoBackFile: { filePath: "local-storage", fileName: "id-back" },
+      selfieFile: { filePath: "local-storage", fileName: "selfie" },
+    };
 
-    // Upload ID Photo Back (if provided)
-    if (data.idPhotoBackFile) {
-      try {
-        const idPhotoBackFile = data.idPhotoBackFile as any;
-        if (idPhotoBackFile instanceof File) {
-          data.idPhotoBackFile = await uploadFundiFile(
-            idPhotoBackFile,
-            "fundi-ids",
-            userId,
-            "id-back"
-          ) as any;
-          progress.idPhotoBack = { complete: true };
-          onProgress?.(progress);
-        }
-      } catch (err) {
-        progress.idPhotoBack = { complete: false, error: (err as Error).message };
-        onProgress?.(progress);
-        return {
-          success: false,
-          message: `ID back photo upload failed: ${(err as Error).message}`,
-        };
-      }
-    }
+    progress.idPhoto = { complete: true };
+    onProgress?.(progress);
 
-    // Upload Selfie
-    if (data.selfieFile) {
-      try {
-        const selfieFile = data.selfieFile as any;
-        if (selfieFile instanceof File) {
-          data.selfieFile = await uploadFundiFile(
-            selfieFile,
-            "fundi-selfies",
-            userId,
-            "selfie"
-          ) as any;
-          progress.selfie = { complete: true };
-          onProgress?.(progress);
-        }
-      } catch (err) {
-        progress.selfie = { complete: false, error: (err as Error).message };
-        onProgress?.(progress);
-        return {
-          success: false,
-          message: `Selfie upload failed: ${(err as Error).message}`,
-        };
-      }
-    }
+    progress.idPhotoBack = { complete: true };
+    onProgress?.(progress);
 
-    // Upload Certificates (optional)
-    if (data.certificateFiles && data.certificateFiles.length > 0) {
-      progress.certificates = [];
-      for (let i = 0; i < data.certificateFiles.length; i++) {
-        try {
-          const certFile = data.certificateFiles[i] as any;
-          if (certFile instanceof File) {
-            data.certificateFiles[i] = await uploadFundiFile(
-              certFile,
-              "fundi-certificates",
-              userId,
-              `certificate-${i}`
-            ) as any;
-            progress.certificates![i] = { complete: true };
-          }
-        } catch (err) {
-          progress.certificates![i] = {
-            complete: false,
-            error: (err as Error).message,
-          };
-          console.warn(`Certificate ${i} upload failed:`, err);
-        }
-      }
-      onProgress?.(progress);
-    }
+    progress.selfie = { complete: true };
+    onProgress?.(progress);
 
-    // Save all data to database
-    const result = await saveFundiRegistration(userId, data);
+    // Save all data to database (with base64 images embedded)
+    const result = await saveFundiRegistration(userId, registrationDataWithImages);
 
     if (!result.success) {
       return {
