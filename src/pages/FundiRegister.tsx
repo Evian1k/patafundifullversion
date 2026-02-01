@@ -1057,11 +1057,6 @@ const FundiRegister = () => {
       return;
     }
 
-    if (data.locationMismatchFlagged) {
-      toast.error("Please fix location issues (retake with real GPS). " + data.locationMismatchReason);
-      return;
-    }
-
     setStep(5);
     updateVerificationStep(3, "approved");
     updateVerificationStep(4, "in_progress");
@@ -1529,17 +1524,6 @@ const FundiRegister = () => {
                     </div>
                   </div>
 
-                  {/* Accuracy Warning */}
-                  {data.accuracy && data.accuracy > 100 && (
-                    <div className="p-4 bg-warning/10 border-2 border-warning rounded-lg flex items-start gap-3">
-                      <AlertCircle className="w-5 h-5 text-warning flex-shrink-0 mt-0.5" />
-                      <div>
-                        <p className="font-medium text-foreground">Low GPS Accuracy</p>
-                        <p className="text-sm text-muted-foreground mt-1">Low GPS accuracy. Please move to an open area and try again.</p>
-                      </div>
-                    </div>
-                  )}
-
                   {data.locationMismatchFlagged && (
                     <div className="p-4 bg-destructive/10 border-2 border-destructive rounded-lg flex items-start gap-3">
                       <AlertCircle className="w-5 h-5 text-destructive flex-shrink-0 mt-0.5" />
@@ -1587,11 +1571,10 @@ const FundiRegister = () => {
                 </Button>
                 <Button 
                   onClick={handleStep4Next} 
-                  disabled={!data.latitude || (data.locationMismatchFlagged && !coordsFromDevice)}
+                  disabled={!data.latitude}
                   className="flex-1"
                 >
-                  {!data.latitude ? "Capture location first" : data.locationMismatchFlagged ? "Fix location issues" : "Continue"}
-                  {!data.latitude || (data.locationMismatchFlagged && !coordsFromDevice) ? null : <ArrowRight className="w-4 h-4 ml-2" />}
+                  Continue <ArrowRight className="w-4 h-4 ml-2" />
                 </Button>
               </div>
             </motion.div>
