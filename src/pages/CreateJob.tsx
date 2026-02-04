@@ -23,7 +23,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import Header from "@/components/layout/Header";
-import { supabase } from "@/integrations/supabase/client";
+import { apiClient } from "@/lib/api";
 import { toast } from "sonner";
 
 // Type definitions
@@ -127,19 +127,21 @@ const CreateJob = () => {
     scheduledTime: "",
     photos: [] as PhotoData[],
   });
-  const [user, setUser] = useState<{ id?: string; user_metadata?: { full_name?: string } } | null>(null);
+  const [user, setUser] = useState<{ id?: string; email?: string } | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user || null);
-    });
+    // Check if user is authenticated
+    const token = localStorage.getItem('auth_token');
+    if (!token) {
+      navigate("/auth");
+      return;
+    }
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_, session) => {
-      setUser(session?.user || null);
-    });
-
-    return () => subscription.unsubscribe();
-  }, []);
+    // Load current user
+    apiClient.getCurrentUser()
+      .then(data => setUser(data.user))
+      .catch(() => navigate("/auth"));
+  }, [navigate]);
 
   // Preload Leaflet
   useEffect(() => {
@@ -420,62 +422,31 @@ const CreateJob = () => {
 
     setLoading(true);
     try {
-      // Get service category ID
-      const { data: categories } = await supabase
-        .from("service_categories")
-        .select("id")
-        .eq("name", jobData.service)
-        .single();
+      // Create job using API
+      const jobPayload = {
+        title: `${jobData.service} - ${jobData.problem || "Service Request"}`,
+        description: jobData.description,
+        category: jobData.service,
+        location: jobData.location,
+        latitude: jobData.latitude,
+        longitude: jobData.longitude,
+        estimatedPrice: jobData.estimatedPrice || null,
+      };
 
-      const categoryId = categories?.id;
+      const jobResult = await apiClient.createJob(jobPayload);
+      if (!jobResult.success) throw new Error(jobResult.message);
 
-      // Create job record
-      const { data: newJob, error: jobError } = await supabase
-        .from("jobs")
-        .insert({
-          customer_id: user.id,
-          title: `${jobData.service} - ${jobData.problem || "Service Request"}`,
-          description: jobData.description,
-          urgency: jobData.urgency,
-          location: jobData.location,
-          latitude: jobData.latitude,
-          longitude: jobData.longitude,
-          category_id: categoryId,
-          status: "pending",
-        })
-        .select()
-        .single();
-
-      if (jobError) throw jobError;
-      if (!newJob) throw new Error("Failed to create job");
+      const newJobId = jobResult.job.id;
 
       // Upload photos if any
       if (jobData.photos.length > 0) {
         for (const photo of jobData.photos) {
-          const fileExt = photo.file.name.split(".").pop();
-          const fileName = `${newJob.id}/${Date.now()}_${Math.random()}.${fileExt}`;
-
-          const { error: uploadError } = await supabase.storage
-            .from("job_photos")
-            .upload(fileName, photo.file);
-
-          if (uploadError) {
-            console.error("Photo upload error:", uploadError);
-            continue;
+          try {
+            await apiClient.uploadJobPhoto(newJobId, photo.file);
+          } catch (error) {
+            console.error("Photo upload error:", error);
+            // Continue with next photo if one fails
           }
-
-          // Get public URL
-          const { data: publicUrl } = supabase.storage
-            .from("job_photos")
-            .getPublicUrl(fileName);
-
-          // Save photo metadata to database
-          await supabase.from("job_photos").insert({
-            job_id: newJob.id,
-            photo_url: publicUrl.publicUrl,
-            photo_type: "before",
-            uploaded_by: user.id,
-          });
         }
       }
 

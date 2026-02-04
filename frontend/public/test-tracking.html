@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>FixIt Connect - Test Tracking</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0f1729; color: #e6eef8; padding: 20px; }
+    .container { max-width: 900px; margin: 0 auto; }
+    h1 { margin-bottom: 30px; color: #fff; }
+    .section { background: #1a2744; border-radius: 12px; padding: 20px; margin-bottom: 20px; border: 1px solid #2d4563; }
+    .section h2 { margin-bottom: 15px; color: #93c5fd; font-size: 16px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px; }
+    button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }
+    button:hover { background: #2563eb; transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    .log { background: #0f1729; border: 1px solid #2d4563; border-radius: 6px; padding: 15px; height: 300px; overflow-y: auto; font-family: monospace; font-size: 12px; line-height: 1.6; }
+    .log-entry { margin-bottom: 8px; }
+    .success { color: #4ade80; }
+    .error { color: #f87171; }
+    .warning { color: #fbbf24; }
+    .info { color: #60a5fa; }
+    .input-group { display: flex; gap: 10px; margin-bottom: 15px; }
+    input { background: #1a2744; border: 1px solid #2d4563; color: #e6eef8; padding: 10px 12px; border-radius: 6px; flex: 1; }
+    input:focus { outline: none; border-color: #3b82f6; }
+    label { display: block; font-size: 12px; color: #93c5fd; margin-bottom: 5px; font-weight: 500; }
+    .status-box { background: #1a2744; border-left: 4px solid #3b82f6; padding: 15px; border-radius: 6px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>🔧 FixIt Connect - Tracking Flow Test</h1>
+
+    <!-- Backend Status -->
+    <div class="section">
+      <h2>🖥️ Backend Status</h2>
+      <div class="controls">
+        <button onclick="checkBackend()">Check Backend</button>
+        <button onclick="checkDatabase()">Check Database</button>
+      </div>
+      <div class="status-box">
+        <strong>Backend URL:</strong> http://localhost:5000<br>
+        <strong>Frontend URL:</strong> http://localhost:8081
+      </div>
+    </div>
+
+    <!-- Authentication -->
+    <div class="section">
+      <h2>👤 Authentication</h2>
+      <div class="input-group">
+        <input type="email" id="email" placeholder="Email" value="test.customer@example.com">
+        <input type="password" id="password" placeholder="Password" value="Test@1234">
+      </div>
+      <div class="controls">
+        <button onclick="login()">Login</button>
+        <button onclick="logout()">Logout</button>
+      </div>
+      <div id="auth-status" class="status-box" style="display:none;"></div>
+    </div>
+
+    <!-- Job Management -->
+    <div class="section">
+      <h2>📋 Job Creation</h2>
+      <div class="input-group">
+        <input type="text" id="job-title" placeholder="Job Title" value="Plumbing Service">
+        <input type="text" id="job-desc" placeholder="Description" value="Fix leaking tap">
+      </div>
+      <div class="controls">
+        <button onclick="createJob()">Create Job</button>
+        <button onclick="getMyJobs()">Get My Jobs</button>
+      </div>
+      <div id="job-status" class="status-box" style="display:none;"></div>
+    </div>
+
+    <!-- Tracking -->
+    <div class="section">
+      <h2>🗺️ Tracking Page</h2>
+      <div class="input-group">
+        <input type="text" id="job-id" placeholder="Job ID">
+      </div>
+      <div class="controls">
+        <button onclick="openTracking()">Open Tracking Page</button>
+      </div>
+    </div>
+
+    <!-- Logs -->
+    <div class="section">
+      <h2>📱 Console Output</h2>
+      <div class="log" id="log"></div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = 'http://localhost:5000/api';
+    const LOCAL_STORAGE_KEY = 'fixit_test_token';
+    let currentToken = localStorage.getItem(LOCAL_STORAGE_KEY);
+    let currentJobId = null;
+
+    function log(msg, type = 'info') {
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      const time = new Date().toLocaleTimeString();
+      entry.textContent = `[${time}] ${msg}`;
+      document.getElementById('log').appendChild(entry);
+      document.getElementById('log').scrollTop = document.getElementById('log').scrollHeight;
+    }
+
+    async function checkBackend() {
+      try {
+        log('Checking backend health...', 'info');
+        const res = await fetch('http://localhost:5000/health');
+        const data = await res.json();
+        if (res.ok) {
+          log(`✓ Backend is healthy: ${data.status}`, 'success');
+        } else {
+          log(`✗ Backend unhealthy: ${res.status}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Backend error: ${e.message}`, 'error');
+      }
+    }
+
+    async function checkDatabase() {
+      try {
+        log('Checking database...', 'info');
+        if (!currentToken) {
+          log('⚠ Login first to check database', 'warning');
+          return;
+        }
+        const res = await fetch(`${API_URL}/auth/me`, {
+          headers: { 'Authorization': `Bearer ${currentToken}` }
+        });
+        if (res.ok) {
+          const data = await res.json();
+          log(`✓ Database accessible. User: ${data.user.fullName}`, 'success');
+        } else {
+          log(`✗ Database error: ${res.status}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Database check error: ${e.message}`, 'error');
+      }
+    }
+
+    async function login() {
+      try {
+        const email = document.getElementById('email').value;
+        const password = document.getElementById('password').value;
+        
+        log(`Logging in as ${email}...`, 'info');
+        const res = await fetch(`${API_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password })
+        });
+        
+        const data = await res.json();
+        if (data.token) {
+          currentToken = data.token;
+          localStorage.setItem(LOCAL_STORAGE_KEY, currentToken);
+          document.getElementById('auth-status').style.display = 'block';
+          document.getElementById('auth-status').innerHTML = `
+            ✓ <strong>Logged in successfully</strong><br>
+            User: ${data.user.fullName}<br>
+            Token: ${currentToken.substring(0, 30)}...
+          `;
+          log(`✓ Login successful for ${email}`, 'success');
+        } else {
+          log(`✗ Login failed: ${data.message || 'unknown error'}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Login error: ${e.message}`, 'error');
+      }
+    }
+
+    function logout() {
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
+      currentToken = null;
+      document.getElementById('auth-status').style.display = 'none';
+      log('Logged out', 'info');
+    }
+
+    async function createJob() {
+      try {
+        if (!currentToken) {
+          log('✗ Must login first', 'error');
+          return;
+        }
+
+        const title = document.getElementById('job-title').value;
+        const desc = document.getElementById('job-desc').value;
+        
+        log(`Creating job: "${title}"...`, 'info');
+        const res = await fetch(`${API_URL}/jobs`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${currentToken}`
+          },
+          body: JSON.stringify({
+            title,
+            description: desc,
+            category: 'General Maintenance',
+            location: 'Test Location, Nairobi',
+            latitude: -1.2921,
+            longitude: 36.8219
+          })
+        });
+
+        const data = await res.json();
+        if (data.job) {
+          currentJobId = data.job.id;
+          document.getElementById('job-id').value = currentJobId;
+          document.getElementById('job-status').style.display = 'block';
+          document.getElementById('job-status').innerHTML = `
+            ✓ <strong>Job created successfully</strong><br>
+            Job ID: ${currentJobId}<br>
+            Status: ${data.job.status}<br>
+            Fundi Assigned: ${data.job.fundiId ? 'Yes' : 'Searching...'}
+          `;
+          log(`✓ Job created: ${currentJobId}`, 'success');
+          log(`Status: ${data.job.status}`, 'info');
+        } else {
+          log(`✗ Job creation failed: ${data.message || JSON.stringify(data)}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Job creation error: ${e.message}`, 'error');
+      }
+    }
+
+    async function getMyJobs() {
+      try {
+        if (!currentToken) {
+          log('✗ Must login first', 'error');
+          return;
+        }
+
+        log('Fetching your jobs...', 'info');
+        const res = await fetch(`${API_URL}/jobs`, {
+          headers: { 'Authorization': `Bearer ${currentToken}` }
+        });
+
+        const data = await res.json();
+        if (data.jobs && data.jobs.length > 0) {
+          log(`✓ Found ${data.jobs.length} jobs`, 'success');
+          data.jobs.slice(0, 3).forEach(job => {
+            log(`  - ${job.id}: ${job.status} (fundi: ${job.fundiId ? 'assigned' : 'none'})`, 'info');
+          });
+        } else {
+          log('No jobs found', 'warning');
+        }
+      } catch (e) {
+        log(`✗ Error fetching jobs: ${e.message}`, 'error');
+      }
+    }
+
+    function openTracking() {
+      const jobId = document.getElementById('job-id').value;
+      if (!jobId) {
+        log('✗ Enter a Job ID first', 'error');
+        return;
+      }
+      
+      if (!currentToken) {
+        log('⚠ Must be logged in to track job', 'warning');
+        return;
+      }
+
+      const url = `http://localhost:8081/job/${jobId}/tracking`;
+      log(`Opening tracking page in new window: ${url}`, 'info');
+      window.open(url, '_blank');
+    }
+
+    // Initialize on load
+    window.addEventListener('DOMContentLoaded', () => {
+      log('Test page loaded', 'success');
+      log('Checking initial backend status...', 'info');
+      checkBackend();
+      
+      if (currentToken) {
+        log(`Restored session from storage`, 'info');
+        document.getElementById('auth-status').style.display = 'block';
+        document.getElementById('auth-status').innerHTML = `✓ <strong>Session restored</strong><br>Token available`;
+      }
+    });
+  </script>
+</body>
+</html>

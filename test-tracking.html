@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Test Tracking Flow</title>
+  <style>
+    body { font-family: monospace; padding: 20px; background: #1a1a1a; color: #fff; }
+    .log { background: #222; padding: 15px; border-radius: 5px; margin: 10px 0; max-height: 300px; overflow-y: auto; }
+    .log-entry { margin: 5px 0; font-size: 12px; }
+    .success { color: #4ade80; }
+    .error { color: #f87171; }
+    .info { color: #60a5fa; }
+    button { background: #3b82f6; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; }
+    button:hover { background: #2563eb; }
+  </style>
+</head>
+<body>
+  <h1>FixIt Connect - Test Tracking Flow</h1>
+  
+  <div>
+    <button onclick="testBackend()">Test Backend Health</button>
+    <button onclick="testLogin()">Test Login</button>
+    <button onclick="testCreateJob()">Test Create Job</button>
+    <button onclick="testJobDetails()">Test Get Job Details</button>
+    <button onclick="testTracking()">Open Tracking Page</button>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <script>
+    const API_URL = 'http://localhost:5000/api';
+    let testToken = null;
+    let testJobId = null;
+
+    function log(msg, type = 'info') {
+      const entry = document.createElement('div');
+      entry.className = `log-entry ${type}`;
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      document.getElementById('log').appendChild(entry);
+      document.getElementById('log').scrollTop = document.getElementById('log').scrollHeight;
+      console.log(msg);
+    }
+
+    async function testBackend() {
+      try {
+        const res = await fetch('http://localhost:5000/health');
+        const data = await res.json();
+        log(`✓ Backend is healthy: ${data.status}`, 'success');
+      } catch (e) {
+        log(`✗ Backend error: ${e.message}`, 'error');
+      }
+    }
+
+    async function testLogin() {
+      try {
+        log('Attempting to login...');
+        const res = await fetch(`${API_URL}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: 'test.customer@example.com',
+            password: 'Test@1234'
+          })
+        });
+        const data = await res.json();
+        if (data.token) {
+          testToken = data.token;
+          localStorage.setItem('auth_token', testToken);
+          log(`✓ Login successful, token: ${testToken.substring(0, 20)}...`, 'success');
+        } else {
+          log(`✗ Login failed: ${data.message || 'unknown error'}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Login error: ${e.message}`, 'error');
+      }
+    }
+
+    async function testCreateJob() {
+      try {
+        if (!testToken) {
+          log('✗ Must login first', 'error');
+          return;
+        }
+        log('Creating test job...');
+        const res = await fetch(`${API_URL}/jobs`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${testToken}`
+          },
+          body: JSON.stringify({
+            title: 'Test Plumbing Job',
+            description: 'Test job for tracking',
+            category: 'Plumbing',
+            location: 'Test Location',
+            latitude: -1.2921,
+            longitude: 36.8219
+          })
+        });
+        const data = await res.json();
+        if (data.job) {
+          testJobId = data.job.id;
+          log(`✓ Job created: ${testJobId}`, 'success');
+        } else {
+          log(`✗ Job creation failed: ${data.message || JSON.stringify(data)}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Job creation error: ${e.message}`, 'error');
+      }
+    }
+
+    async function testJobDetails() {
+      try {
+        if (!testToken || !testJobId) {
+          log('✗ Must login and create job first', 'error');
+          return;
+        }
+        log(`Fetching job details for ${testJobId}...`);
+        const res = await fetch(`${API_URL}/jobs/${testJobId}`, {
+          headers: { 'Authorization': `Bearer ${testToken}` }
+        });
+        const data = await res.json();
+        if (data.job) {
+          log(`✓ Job details: status=${data.job.status}, fundi=${data.job.fundiId ? 'assigned' : 'not assigned'}`, 'success');
+        } else {
+          log(`✗ Failed to fetch job: ${data.message || JSON.stringify(data)}`, 'error');
+        }
+      } catch (e) {
+        log(`✗ Job fetch error: ${e.message}`, 'error');
+      }
+    }
+
+    function testTracking() {
+      if (!testJobId) {
+        log('✗ Must create job first', 'error');
+        return;
+      }
+      const url = `http://localhost:8081/job/${testJobId}/tracking`;
+      log(`Opening tracking page: ${url}`);
+      window.open(url, '_blank');
+    }
+
+    // Run on load
+    window.addEventListener('DOMContentLoaded', () => {
+      log('Test page loaded. Backend running on port 5000, Frontend on 8081');
+    });
+  </script>
+</body>
+</html>
