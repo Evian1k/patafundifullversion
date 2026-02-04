@@ -1,23 +1,17 @@
 #!/usr/bin/env node
 
 /**
- * Create Supabase storage buckets for Fundi registration
- * Usage: node scripts/create-storage-buckets.js
+ * DEPRECATED: This script used Supabase storage and is no longer needed.
  * 
- * Requires environment variables:
- * - VITE_SUPABASE_URL
- * - VITE_SUPABASE_ANON_KEY
+ * The app now uses local file storage at /uploads/fundis/
+ * No bucket creation is necessary.
  */
 
-import { createClient } from '@supabase/supabase-js';
-import dotenv from 'dotenv';
-
-dotenv.config();
-
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.VITE_SUPABASE_PUBLISHABLE_KEY;
-
-if (!supabaseUrl || !supabaseKey) {
+console.log("⚠️  DEPRECATED: This script uses Supabase storage and is no longer used.");
+console.log("");
+console.log("The app now uses local file storage at /uploads/fundis/");
+console.log("No bucket configuration is needed.");
+console.log("");
   console.error('❌ Missing environment variables:');
   console.error('   VITE_SUPABASE_URL:', supabaseUrl ? '✓' : '✗');
   console.error('   VITE_SUPABASE_PUBLISHABLE_KEY:', supabaseKey ? '✓' : '✗');

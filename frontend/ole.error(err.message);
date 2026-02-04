@@ -1,0 +1,4 @@
+ id | first_name | last_name | email | phone | verification_status | created_at 
+----+------------+-----------+-------+-------+---------------------+------------
+(0 rows)
+

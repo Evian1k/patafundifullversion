@@ -1,32 +1,20 @@
 #!/usr/bin/env node
 /**
- * Execute migrations to create admin tables
- * This creates the admin_accounts table needed for admin login
+ * DEPRECATED: This script used Supabase and is no longer needed.
+ * 
+ * All database migrations should be handled via the backend:
+ * 
+ * To set up the database:
+ *   cd backend && node src/scripts/setup-db.js
+ * 
+ * The backend now uses PostgreSQL directly without Supabase.
  */
 
-import { createClient } from "@supabase/supabase-js";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const SUPABASE_URL = "https://tudclrlaxmxfmzjnbkac.supabase.co";
-const SUPABASE_ANON_KEY =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InR1ZGNscmxheG14Zm16am5ia2FjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk4NTMzMjIsImV4cCI6MjA4NTQyOTMyMn0.g7CAHvvvv0MVH-kNJyxOLB3hLt597TjQwnBjKWK0MxU";
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-async function runMigration() {
-  console.log("📋 Running admin system migrations...\n");
-
-  try {
-    // Read the migration file
-    const migrationPath = path.join(
-      __dirname,
-      "../supabase/migrations/20260131_create_admin_system.sql"
-    );
-    const sql = fs.readFileSync(migrationPath, "utf-8");
+console.log("⚠️  DEPRECATED: This script uses Supabase and is no longer used.");
+console.log("");
+console.log("To set up the database, run:");
+console.log("  cd backend && node src/scripts/setup-db.js");
+console.log("");
 
     // Split into individual statements
     const statements = sql

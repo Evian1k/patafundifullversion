@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import Tesseract from "tesseract.js";
 import { handleFundiSubmission, FundiRegistrationData } from "@/modules/fundis";
+import { apiClient } from "@/lib/api";
 import {
   ArrowLeft,
   ArrowRight,
@@ -18,7 +19,6 @@ import {
   EyeOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 
 interface VerificationStep {
@@ -1153,35 +1153,14 @@ const FundiRegister = () => {
   const handleSubmit = async () => {
     setLoading(true);
     try {
-      // Create auth account if user doesn't exist
-      const { data: { user: currentUser } } = await supabase.auth.getUser();
-      let userId: string;
+      // First sign up the user
+      const signupResult = await apiClient.signup(
+        data.email,
+        data.password,
+        `${data.firstName} ${data.lastName}`
+      );
 
-      if (currentUser) {
-        userId = currentUser.id;
-      } else {
-        const { data: authData, error: authError } = await supabase.auth.signUp({
-          email: data.email,
-          password: data.password,
-          options: {
-            data: {
-              full_name: `${data.firstName} ${data.lastName}`,
-              role: "fundi",
-              phone: data.phone,
-            },
-          },
-        });
-
-        if (authError) throw authError;
-        if (!authData.user?.id) throw new Error("Failed to create account");
-
-        userId = authData.user.id;
-
-        // Set the session if signup returned a session
-        if (authData.session) {
-          await supabase.auth.setSession(authData.session);
-        }
-      }
+      const userId = signupResult.user.id;
 
       // Prepare registration data for backend
       const registrationData: Partial<FundiRegistrationData> = {
@@ -1194,7 +1173,7 @@ const FundiRegister = () => {
         idNumberExtracted: data.extractedIdName,
         idNameExtracted: data.extractedIdName,
         
-        // File objects (will be uploaded by the service)
+        // File objects (will be uploaded by the API)
         idPhotoFile: data.idPhoto as any,
         idPhotoBackFile: data.idPhotoBack as any,
         selfieFile: data.selfiePhoto as any,

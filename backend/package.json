@@ -1,0 +1,33 @@
+{
+  "name": "fixit-connect-backend",
+  "version": "1.0.0",
+  "description": "FixIt Connect Custom Backend",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "node --watch src/index.js",
+    "start": "node src/index.js",
+    "setup-db": "node src/scripts/setup-db.js",
+    "setup-admin": "node scripts/setup-admin.js",
+    "reset-db": "node scripts/reset-database.js",
+    "migrate": "node src/scripts/migrate.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "pg": "^8.9.0",
+    "jsonwebtoken": "^9.0.0",
+    "bcryptjs": "^2.4.3",
+    "multer": "^1.4.5-lts.1",
+    "sharp": "^0.32.0",
+    "tesseract.js": "^4.1.1",
+    "uuid": "^9.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^2.0.20"
+  }
+}
