@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { apiClient } from "@/lib/api";
 import { toast } from "sonner";
 import FundiVerificationModal from "./FundiVerificationModal";
+import AdminLayout from "@/components/admin/AdminLayout";
 
 interface Fundi {
   id: string;
@@ -54,10 +55,18 @@ export default function FundiVerificationManagement() {
       if (statusFilter) endpoint += `&status=${statusFilter}`;
 
       const response = await apiClient.request(endpoint, { includeAuth: true });
-      setFundis(response.fundis || []);
-      setPagination(response.pagination || { page, limit: 10, total: 0, pages: 1 });
+      
+      if (response && response.success) {
+        setFundis(response.fundis || []);
+        setPagination(response.pagination || { page, limit: 10, total: 0, pages: 1 });
+      } else {
+        setFundis([]);
+        setPagination({ page, limit: 10, total: 0, pages: 1 });
+      }
     } catch (error) {
       console.error("Error fetching fundis:", error);
+      setFundis([]);
+      setPagination({ page, limit: 10, total: 0, pages: 1 });
       toast.error("Failed to load fundis");
     } finally {
       setLoading(false);
@@ -141,7 +150,8 @@ export default function FundiVerificationManagement() {
   }
 
   return (
-    <div className="p-8 space-y-6">
+    <AdminLayout>
+      <div className="p-8 space-y-6">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
@@ -288,6 +298,7 @@ export default function FundiVerificationManagement() {
           }}
         />
       )}
-    </div>
+      </div>
+    </AdminLayout>
   );
 }

@@ -929,17 +929,14 @@ const FundiRegister = () => {
       }
 
       const issues = blob.size < 50000 ? ["image_too_small_screenshot"] : [];
-      const faceMatch = Math.random() * 0.3 + 0.7;
-      const liveness = Math.random() * 0.2 + 0.8;
 
+      // Face and liveness verification will be computed by backend using actual ML model
       setData((prev) => ({
         ...prev,
         selfiePhoto: blob,
         selfiePhotoPreview: URL.createObjectURL(blob),
         selfieTimestamp: Date.now(),
         isSelfieCapture: true,
-        faceMatchScore: faceMatch,
-        livenessScore: liveness,
         selfieQualityIssues: issues,
       }));
 

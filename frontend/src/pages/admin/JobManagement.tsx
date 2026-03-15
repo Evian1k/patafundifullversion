@@ -1,343 +1,313 @@
-import { useEffect, useState } from "react";
+import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { Search, Filter, AlertCircle, Loader2, MapPin } from "lucide-react";
-import { Card } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import { supabase } from "@/integrations/supabase/client";
+  Search,
+  MapPin,
+  Clock,
+  DollarSign,
+  Loader2,
+  Eye,
+  Filter,
+} from "lucide-react";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { apiClient } from "@/lib/api";
 import { toast } from "sonner";
-
-type JobStatus = "pending" | "matching" | "accepted" | "in_progress" | "completed" | "cancelled" | "disputed";
+import AdminLayout from "@/components/admin/AdminLayout";
 
 interface Job {
   id: string;
   title: string;
   description: string;
-  status: JobStatus | null;
-  customer_id: string;
-  fundi_id: string | null;
+  category: string;
+  status: string;
+  customerId: string;
+  customerName: string;
+  fundiId: string | null;
+  fundiName: string | null;
+  estimatedPrice: number;
+  finalPrice: number;
   location: string;
-  latitude: number | null;
-  longitude: number | null;
-  estimated_price: number | null;
-  final_price: number | null;
-  created_at: string;
-  completed_at: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
+
+interface PaginationInfo {
+  page: number;
+  limit: number;
+  total: number;
+  pages: number;
+}
+
+const STATUS_COLORS: Record<string, string> = {
+  pending: "bg-yellow-100 text-yellow-800 border-yellow-300",
+  matching: "bg-blue-100 text-blue-800 border-blue-300",
+  accepted: "bg-purple-100 text-purple-800 border-purple-300",
+  in_progress: "bg-cyan-100 text-cyan-800 border-cyan-300",
+  completed: "bg-green-100 text-green-800 border-green-300",
+  cancelled: "bg-red-100 text-red-800 border-red-300",
+  disputed: "bg-orange-100 text-orange-800 border-orange-300",
+};
 
 export default function JobManagement() {
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [filteredJobs, setFilteredJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [pagination, setPagination] = useState<PaginationInfo>({
+    page: 1,
+    limit: 10,
+    total: 0,
+    pages: 1,
+  });
 
-  useEffect(() => {
-    fetchJobs();
-  }, []);
-
-  useEffect(() => {
-    let filtered = jobs;
-
-    if (statusFilter !== "all") {
-      filtered = filtered.filter((job) => job.status === statusFilter);
-    }
-
-    if (searchTerm) {
-      filtered = filtered.filter(
-        (job) =>
-          job.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
-          job.id.includes(searchTerm) ||
-          job.location.toLowerCase().includes(searchTerm.toLowerCase())
-      );
-    }
-
-    setFilteredJobs(filtered);
-  }, [searchTerm, statusFilter, jobs]);
-
-  const fetchJobs = async () => {
+  const fetchJobs = async (page = 1) => {
+    setLoading(true);
     try {
-      const { data, error } = await supabase
-        .from("jobs")
-        .select("*")
-        .order("created_at", { ascending: false });
+      let endpoint = `/admin/jobs?page=${page}&limit=${pagination.limit}`;
+      if (searchQuery) {
+        endpoint += `&q=${encodeURIComponent(searchQuery)}`;
+      }
+      if (statusFilter) {
+        endpoint += `&status=${statusFilter}`;
+      }
 
-      if (error) throw error;
-      setJobs(data || []);
+      const response = await apiClient.request(endpoint, { includeAuth: true });
+      
+      if (response && response.success) {
+        setJobs(response.jobs || []);
+        setPagination(response.pagination || { page, limit: 10, total: 0, pages: 1 });
+      } else {
+        setJobs([]);
+        setPagination({ page, limit: 10, total: 0, pages: 1 });
+      }
     } catch (error) {
       console.error("Error fetching jobs:", error);
+      setJobs([]);
+      setPagination({ page, limit: 10, total: 0, pages: 1 });
       toast.error("Failed to load jobs");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleCancelJob = async (jobId: string) => {
-    try {
-      const { error } = await supabase
-        .from("jobs")
-        .update({ status: "cancelled" as JobStatus })
-        .eq("id", jobId);
+  useEffect(() => {
+    fetchJobs(1);
+  }, []);
 
-      if (error) throw error;
-      toast.success("Job cancelled");
-      fetchJobs();
-    } catch (error) {
-      toast.error("Failed to cancel job");
-    }
+  const handleSearch = (e: React.FormEvent) => {
+    e.preventDefault();
+    fetchJobs(1);
   };
 
-  const handleDisputeJob = async (jobId: string) => {
-    try {
-      const { error } = await supabase
-        .from("jobs")
-        .update({ status: "disputed" as JobStatus })
-        .eq("id", jobId);
-
-      if (error) throw error;
-      toast.success("Job marked as disputed");
-      fetchJobs();
-    } catch (error) {
-      toast.error("Failed to mark job as disputed");
-    }
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat("en-KE", {
+      style: "currency",
+      currency: "KES",
+      maximumFractionDigits: 0,
+    }).format(amount);
   };
 
-  const getStatusColor = (status: string | null) => {
-    switch (status) {
-      case "completed":
-        return "text-green-500";
-      case "cancelled":
-        return "text-red-500";
-      case "accepted":
-      case "in_progress":
-        return "text-blue-500";
-      case "pending":
-      case "matching":
-        return "text-yellow-500";
-      case "disputed":
-        return "text-orange-500";
-      default:
-        return "text-muted-foreground";
-    }
+  const formatDate = (date: string) => {
+    return new Date(date).toLocaleDateString("en-KE", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
   };
-
-  const getStatusBg = (status: string | null) => {
-    switch (status) {
-      case "completed":
-        return "bg-green-500/10";
-      case "cancelled":
-        return "bg-red-500/10";
-      case "accepted":
-      case "in_progress":
-        return "bg-blue-500/10";
-      case "pending":
-      case "matching":
-        return "bg-yellow-500/10";
-      case "disputed":
-        return "bg-orange-500/10";
-      default:
-        return "bg-slate-500/10";
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="p-8 flex items-center justify-center min-h-screen">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    );
-  }
-
   return (
-    <div className="p-8 space-y-6">
-      {/* Header */}
-      <div>
-        <h1 className="text-3xl font-bold mb-2">Job Management</h1>
-        <p className="text-muted-foreground">Monitor and manage all jobs</p>
-      </div>
-
-      {/* Filters */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        <Card className="p-4 border-2">
-          <div className="relative">
-            <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
-            <Input
-              placeholder="Search jobs, location..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-10"
-            />
+    <AdminLayout>
+      <div className="p-8 space-y-6">
+        {/* Header */}
+        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold">Job Monitoring</h1>
+            <p className="text-muted-foreground mt-1">
+              View and monitor all jobs on the platform
+            </p>
           </div>
-        </Card>
-
-        <Card className="p-4 border-2">
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">All Status</SelectItem>
-              <SelectItem value="pending">Pending</SelectItem>
-              <SelectItem value="matching">Matching</SelectItem>
-              <SelectItem value="accepted">Accepted</SelectItem>
-              <SelectItem value="in_progress">In Progress</SelectItem>
-              <SelectItem value="completed">Completed</SelectItem>
-              <SelectItem value="cancelled">Cancelled</SelectItem>
-              <SelectItem value="disputed">Disputed</SelectItem>
-            </SelectContent>
-          </Select>
-        </Card>
-
-        <Card className="p-4 border-2 flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">
-            {filteredJobs.length} jobs
-          </span>
-          <Filter className="w-4 h-4 text-muted-foreground" />
-        </Card>
-      </div>
-
-      {/* Content Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Jobs List */}
-        <div className="lg:col-span-2 space-y-3 max-h-[calc(100vh-300px)] overflow-auto">
-          {filteredJobs.length === 0 ? (
-            <Card className="p-8 text-center border-2">
-              <AlertCircle className="w-8 h-8 text-muted-foreground mx-auto mb-2" />
-              <p className="text-muted-foreground">No jobs found</p>
-            </Card>
-          ) : (
-            filteredJobs.map((job) => (
-              <motion.div
-                key={job.id}
-                whileHover={{ x: 4 }}
-                onClick={() => setSelectedJob(job)}
-              >
-                <Card
-                  className={`p-4 border-2 cursor-pointer transition ${
-                    selectedJob?.id === job.id
-                      ? "border-primary bg-primary/5"
-                      : "hover:border-primary/40"
-                  }`}
-                >
-                  <div className="space-y-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <h3 className="font-semibold flex-1">{job.title}</h3>
-                      <span
-                        className={`px-2 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${getStatusBg(
-                          job.status
-                        )} ${getStatusColor(job.status)}`}
-                      >
-                        {job.status || "unknown"}
-                      </span>
-                    </div>
-                    <p className="text-sm text-muted-foreground line-clamp-1">
-                      {job.description}
-                    </p>
-                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                      <MapPin className="w-3 h-3" />
-                      {job.location}
-                    </div>
-                    <div className="flex justify-between text-xs text-muted-foreground">
-                      <span>Est: KES {job.estimated_price || 0}</span>
-                      {job.final_price && <span>Final: KES {job.final_price}</span>}
-                    </div>
-                  </div>
-                </Card>
-              </motion.div>
-            ))
-          )}
+          <div className="text-right">
+            <p className="text-sm text-muted-foreground">Total Jobs</p>
+            <p className="text-2xl font-bold">{pagination.total}</p>
+          </div>
         </div>
 
-        {/* Detail Panel */}
-        {selectedJob && (
-          <motion.div
-            initial={{ opacity: 0, x: 20 }}
-            animate={{ opacity: 1, x: 0 }}
-            className="space-y-4"
-          >
-            <Card className="p-6 border-2 space-y-4">
-              {/* Title & Status */}
-              <div>
-                <h3 className="text-lg font-semibold mb-2">{selectedJob.title}</h3>
-                <span
-                  className={`px-3 py-1 rounded-full text-sm font-semibold ${getStatusBg(
-                    selectedJob.status
-                  )} ${getStatusColor(selectedJob.status)}`}
+        {/* Filters */}
+        <Card className="p-6 space-y-4">
+          <form onSubmit={handleSearch} className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="relative">
+                <Search className="absolute left-3 top-3 w-4 h-4 text-muted-foreground" />
+                <Input
+                  placeholder="Search jobs by title, ID, or location..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  className="pl-10"
+                />
+              </div>
+
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="px-4 py-2 border rounded-lg bg-white"
+              >
+                <option value="">All Statuses</option>
+                <option value="pending">Pending</option>
+                <option value="matching">Matching</option>
+                <option value="accepted">Accepted</option>
+                <option value="in_progress">In Progress</option>
+                <option value="completed">Completed</option>
+                <option value="cancelled">Cancelled</option>
+                <option value="disputed">Disputed</option>
+              </select>
+            </div>
+
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading ? "Searching..." : "Filter Jobs"}
+            </Button>
+          </form>
+        </Card>
+
+        {/* Jobs List */}
+        {loading ? (
+          <Card className="p-12 text-center">
+            <Loader2 className="w-8 h-8 animate-spin mx-auto mb-4 text-primary" />
+            <p className="text-muted-foreground">Loading jobs...</p>
+          </Card>
+        ) : jobs.length === 0 ? (
+          <Card className="p-12 text-center">
+            <Loader2 className="w-12 h-12 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-lg font-semibold mb-2">No Jobs Found</h3>
+            <p className="text-muted-foreground">
+              {searchQuery
+                ? "Try adjusting your search criteria"
+                : "No jobs available"}
+            </p>
+          </Card>
+        ) : (
+          <>
+            <div className="grid gap-4">
+              {jobs.map((job) => (
+                <motion.div
+                  key={job.id}
+                  whileHover={{ y: -2 }}
                 >
-                  {selectedJob.status || "unknown"}
-                </span>
-              </div>
+                  <Card className="p-6 hover:shadow-md transition">
+                    <div className="space-y-4">
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1">
+                          <h3 className="text-lg font-semibold text-gray-900">
+                            {job.title}
+                          </h3>
+                          <p className="text-sm text-gray-600 mt-1 line-clamp-2">
+                            {job.description}
+                          </p>
+                        </div>
+                        <span
+                          className={`px-3 py-1 rounded-full text-sm font-medium border ${
+                            STATUS_COLORS[job.status] ||
+                            "bg-gray-100 text-gray-800 border-gray-300"
+                          }`}
+                        >
+                          {job.status.replace("_", " ").toUpperCase()}
+                        </span>
+                      </div>
 
-              {/* Description */}
-              <div>
-                <p className="text-sm font-semibold mb-2">Description</p>
-                <p className="text-sm text-muted-foreground">{selectedJob.description}</p>
-              </div>
+                      <div className="grid grid-cols-2 md:grid-cols-5 gap-4 pt-4 border-t">
+                        <div>
+                          <p className="text-xs text-gray-500 font-medium">
+                            CATEGORY
+                          </p>
+                          <p className="text-sm font-semibold text-gray-900 mt-1">
+                            {job.category}
+                          </p>
+                        </div>
 
-              {/* Location */}
-              <div>
-                <p className="text-sm font-semibold mb-2">Location</p>
-                <p className="text-sm text-muted-foreground flex items-center gap-2">
-                  <MapPin className="w-4 h-4" />
-                  {selectedJob.location}
+                        <div>
+                          <p className="text-xs text-gray-500 font-medium">
+                            CUSTOMER
+                          </p>
+                          <p className="text-sm font-semibold text-gray-900 mt-1">
+                            {job.customerName}
+                          </p>
+                        </div>
+
+                        <div>
+                          <p className="text-xs text-gray-500 font-medium">
+                            FUNDI
+                          </p>
+                          <p className="text-sm font-semibold text-gray-900 mt-1">
+                            {job.fundiName || "Unassigned"}
+                          </p>
+                        </div>
+
+                        <div>
+                          <p className="text-xs text-gray-500 font-medium">
+                            PRICE
+                          </p>
+                          <p className="text-sm font-semibold text-green-600 mt-1">
+                            {job.finalPrice > 0
+                              ? formatCurrency(job.finalPrice)
+                              : formatCurrency(job.estimatedPrice)}
+                          </p>
+                        </div>
+
+                        <div>
+                          <p className="text-xs text-gray-500 font-medium">
+                            CREATED
+                          </p>
+                          <p className="text-sm font-semibold text-gray-900 mt-1">
+                            {formatDate(job.createdAt)}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 pt-2 text-sm text-gray-600">
+                        <MapPin className="w-4 h-4" />
+                        <span>{job.location}</span>
+                      </div>
+                    </div>
+                  </Card>
+                </motion.div>
+              ))}
+            </div>
+
+            {/* Pagination */}
+            {pagination.pages > 1 && (
+              <div className="flex items-center justify-between mt-6">
+                <p className="text-sm text-gray-600">
+                  Page {pagination.page} of {pagination.pages}
                 </p>
-                {selectedJob.latitude && selectedJob.longitude && (
-                  <p className="text-xs text-muted-foreground mt-1">
-                    {selectedJob.latitude}, {selectedJob.longitude}
-                  </p>
-                )}
-              </div>
-
-              {/* Pricing */}
-              <div className="space-y-2">
-                <p className="text-sm font-semibold">Pricing</p>
-                <div className="text-sm space-y-1">
-                  <p>Estimated: <span className="font-mono">KES {selectedJob.estimated_price || 0}</span></p>
-                  {selectedJob.final_price && (
-                    <p>Final: <span className="font-mono">KES {selectedJob.final_price}</span></p>
-                  )}
-                </div>
-              </div>
-
-              {/* Dates */}
-              <div className="text-xs text-muted-foreground space-y-1">
-                <p>Created: {new Date(selectedJob.created_at).toLocaleString()}</p>
-                {selectedJob.completed_at && (
-                  <p>Completed: {new Date(selectedJob.completed_at).toLocaleString()}</p>
-                )}
-              </div>
-
-              {/* Actions */}
-              {selectedJob.status !== "completed" && selectedJob.status !== "cancelled" && (
-                <div className="pt-4 border-t border-border space-y-2">
+                <div className="flex gap-2">
                   <Button
-                    onClick={() => handleDisputeJob(selectedJob.id)}
+                    onClick={() =>
+                      fetchJobs(Math.max(1, pagination.page - 1))
+                    }
+                    disabled={pagination.page === 1 || loading}
                     variant="outline"
-                    className="w-full"
                   >
-                    Mark as Disputed
+                    Previous
                   </Button>
                   <Button
-                    onClick={() => handleCancelJob(selectedJob.id)}
-                    variant="destructive"
-                    className="w-full"
+                    onClick={() =>
+                      fetchJobs(
+                        Math.min(pagination.pages, pagination.page + 1)
+                      )
+                    }
+                    disabled={pagination.page === pagination.pages || loading}
+                    variant="outline"
                   >
-                    Cancel Job
+                    Next
                   </Button>
                 </div>
-              )}
-            </Card>
-          </motion.div>
+              </div>
+            )}
+          </>
         )}
       </div>
-    </div>
+    </AdminLayout>
   );
 }

@@ -10,8 +10,10 @@ import { fileURLToPath } from 'url';
 import authRoutes from './routes/auth.js';
 import adminRoutes from './routes/admin.js';
 import fundiRoutes from './routes/fundi.js';
+import fundiRegistrationRoutes from './routes/fundi-registration.js';
 import jobRoutes from './routes/jobs.js';
 import uploadRoutes from './routes/upload.js';
+import paymentRoutes from './routes/payments.js';
 
 // Middleware
 import { errorHandler } from './middlewares/errorHandler.js';
@@ -47,8 +49,10 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/fundi/registration', fundiRegistrationRoutes);
 app.use('/api/fundi', fundiRoutes);
 app.use('/api/jobs', authMiddleware, jobRoutes);
+app.use('/api/payments', authMiddleware, paymentRoutes);
 app.use('/api/upload', authMiddleware, uploadRoutes);
 
 // Error handling

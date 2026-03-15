@@ -4,9 +4,9 @@ import { hashPassword } from '../src/utils/password.js';
 import { v4 as uuidv4 } from 'uuid';
 
 async function setupAdmin() {
-  const email = 'admin@fixitconnect.com';
-  const password = 'admin123456';
-  const fullName = 'Admin User';
+  const email = 'emmanuelevian@gmail.com';
+  const password = 'emmanuelevian12k@Q';
+  const fullName = 'Emmanuel Evian';
 
   try {
     console.log('🔐 Creating admin account...');

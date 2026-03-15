@@ -34,8 +34,24 @@ const Auth = () => {
   useEffect(() => {
     // Check if user is already logged in
     const token = localStorage.getItem('auth_token');
-    if (token) {
-      navigate("/dashboard");
+    const explicitMode = searchParams.get('mode');
+    // If the URL explicitly requested a mode (signup/login), respect it and don't auto-redirect
+    if (token && !explicitMode) {
+      (async () => {
+        try {
+          const meRes = await apiClient.getCurrentUser();
+          const me = meRes && meRes.user ? meRes.user : null;
+          if (me && (me.role === 'fundi' || (me.roles && me.roles.includes('fundi')))) {
+            navigate('/fundi');
+          } else if (me && (me.role === 'admin' || (me.roles && me.roles.includes('admin')))) {
+            navigate('/admin/dashboard');
+          } else {
+            navigate('/dashboard');
+          }
+        } catch (err) {
+          navigate('/dashboard');
+        }
+      })();
     }
   }, [navigate]);
 
@@ -55,11 +71,35 @@ const Auth = () => {
           formData.name
         );
         toast.success("Account created successfully!");
-        navigate("/dashboard");
+        try {
+          const meRes = await apiClient.getCurrentUser();
+          const me = meRes && meRes.user ? meRes.user : null;
+          if (me && (me.role === 'fundi' || (me.roles && me.roles.includes('fundi')))) {
+            navigate('/fundi');
+          } else if (me && (me.role === 'admin' || (me.roles && me.roles.includes('admin')))) {
+            navigate('/admin/dashboard');
+          } else {
+            navigate('/dashboard');
+          }
+        } catch (err) {
+          navigate('/dashboard');
+        }
       } else {
         await apiClient.login(validatedData.email, validatedData.password);
         toast.success("Welcome back!");
-        navigate("/dashboard");
+        try {
+          const meRes = await apiClient.getCurrentUser();
+          const me = meRes && meRes.user ? meRes.user : null;
+          if (me && (me.role === 'fundi' || (me.roles && me.roles.includes('fundi')))) {
+            navigate('/fundi');
+          } else if (me && (me.role === 'admin' || (me.roles && me.roles.includes('admin')))) {
+            navigate('/admin/dashboard');
+          } else {
+            navigate('/dashboard');
+          }
+        } catch (err) {
+          navigate('/dashboard');
+        }
       }
     } catch (error) {
       if (error instanceof z.ZodError) {

@@ -1660,7 +1660,7 @@ const FundiRegister = () => {
                 </div>
 
               {/* Show info after location is set */}
-              {data.latitude && data.longitude && (
+              {data.latitude != null && data.longitude != null && (
                 <div className="space-y-3">
                   <div className="p-4 bg-secondary rounded-lg border border-border">
                     <p className="text-sm text-muted-foreground">Location Name</p>
@@ -1670,11 +1670,11 @@ const FundiRegister = () => {
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div className="p-3 bg-secondary rounded-lg border border-border">
                       <p className="text-xs text-muted-foreground mb-1">Latitude</p>
-                      <p className="font-mono font-bold">{data.latitude.toFixed(6)}°</p>
+                      <p className="font-mono font-bold">{typeof data.latitude === 'number' ? data.latitude.toFixed(6) : '—'}°</p>
                     </div>
                     <div className="p-3 bg-secondary rounded-lg border border-border">
                       <p className="text-xs text-muted-foreground mb-1">Longitude</p>
-                      <p className="font-mono font-bold">{data.longitude.toFixed(6)}°</p>
+                      <p className="font-mono font-bold">{typeof data.longitude === 'number' ? data.longitude.toFixed(6) : '—'}°</p>
                     </div>
                   </div>
 

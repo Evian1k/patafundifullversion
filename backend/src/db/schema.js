@@ -11,23 +11,31 @@ CREATE TABLE IF NOT EXISTS users (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Fundi profiles
+-- Fundi profiles (with step-by-step registration tracking)
 CREATE TABLE IF NOT EXISTS fundi_profiles (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-  first_name VARCHAR(255) NOT NULL,
-  last_name VARCHAR(255) NOT NULL,
-  email VARCHAR(255) NOT NULL,
-  phone VARCHAR(20) NOT NULL,
-  id_number VARCHAR(50) NOT NULL,
+  registration_step INTEGER DEFAULT 1,
+  step_1_completed_at TIMESTAMP,
+  step_2_completed_at TIMESTAMP,
+  step_3_completed_at TIMESTAMP,
+  step_4_completed_at TIMESTAMP,
+  step_5_completed_at TIMESTAMP,
+  step_6_completed_at TIMESTAMP,
+  step_7_completed_at TIMESTAMP,
+  first_name VARCHAR(255),
+  last_name VARCHAR(255),
+  email VARCHAR(255),
+  phone VARCHAR(20),
+  id_number VARCHAR(50),
   id_number_extracted VARCHAR(50),
   id_name_extracted VARCHAR(255),
   id_photo_path VARCHAR(512),
   id_photo_back_path VARCHAR(512),
   selfie_path VARCHAR(512),
   certificate_paths TEXT[] DEFAULT '{}',
-  latitude DECIMAL(10, 8) NOT NULL,
-  longitude DECIMAL(11, 8) NOT NULL,
+  latitude DECIMAL(10, 8),
+  longitude DECIMAL(11, 8),
   accuracy INTEGER,
   altitude DECIMAL(8, 2),
   location_address VARCHAR(512),
@@ -38,10 +46,12 @@ CREATE TABLE IF NOT EXISTS fundi_profiles (
   skills TEXT[] DEFAULT '{}',
   experience_years INTEGER DEFAULT 0,
   mpesa_number VARCHAR(20),
-  verification_status VARCHAR(50) DEFAULT 'pending',
+  payment_method_verified BOOLEAN DEFAULT false,
+  verification_status VARCHAR(50) DEFAULT 'incomplete',
   verification_notes TEXT,
   subscription_active BOOLEAN DEFAULT false,
   subscription_expires_at TIMESTAMP,
+  fraud_flags JSONB DEFAULT '[]',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT valid_coordinates CHECK (latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180)
@@ -160,6 +170,16 @@ CREATE TABLE IF NOT EXISTS admin_action_logs (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Password reset tokens
+CREATE TABLE IF NOT EXISTS password_resets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  token VARCHAR(255) NOT NULL UNIQUE,
+  expires_at TIMESTAMP NOT NULL,
+  used BOOLEAN DEFAULT false,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_fundi_profiles_user_id ON fundi_profiles(user_id);
@@ -173,6 +193,98 @@ CREATE INDEX IF NOT EXISTS idx_admin_action_logs_admin_id ON admin_action_logs(a
 CREATE INDEX IF NOT EXISTS idx_admin_action_logs_target_id ON admin_action_logs(target_id);
 CREATE INDEX IF NOT EXISTS idx_admin_action_logs_created_at ON admin_action_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_fundi_profiles_verification_status ON fundi_profiles(verification_status);
+
+-- Token blacklist for logout / token revocation
+CREATE TABLE IF NOT EXISTS token_blacklist (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  token VARCHAR(1024) NOT NULL UNIQUE,
+  user_id UUID REFERENCES users(id),
+  expires_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_token_blacklist_token ON token_blacklist(token);
+
+-- Persistent fundi locations for matching and tracking
+CREATE TABLE IF NOT EXISTS fundi_locations (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  latitude DECIMAL(10,8),
+  longitude DECIMAL(11,8),
+  accuracy INTEGER,
+  online BOOLEAN DEFAULT false,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fundi_locations_updated_at ON fundi_locations(updated_at DESC);
+
+-- Fundi wallet and transactions
+CREATE TABLE IF NOT EXISTS fundi_wallets (
+  user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  balance DECIMAL(12,2) DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS fundi_wallet_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount DECIMAL(12,2) NOT NULL,
+  type VARCHAR(50) NOT NULL,
+  source VARCHAR(100),
+  job_id UUID,
+  description TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fundi_wallet_user ON fundi_wallet_transactions(user_id);
+
+-- Fundi withdrawal requests (M-Pesa readiness)
+CREATE TABLE IF NOT EXISTS fundi_withdrawals (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  amount DECIMAL(12,2) NOT NULL,
+  mpesa_number VARCHAR(30),
+  status VARCHAR(50) DEFAULT 'requested',
+  processed_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fundi_withdrawals_user ON fundi_withdrawals(user_id);
+
+-- Job requests for real-time matching
+CREATE TABLE IF NOT EXISTS job_requests (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  fundi_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status VARCHAR(50) DEFAULT 'pending', -- pending, sent, declined, accepted, expired
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_job_requests_job_id ON job_requests(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_requests_fundi_id ON job_requests(fundi_id);
+
+-- Fundi verification evidence (OCR scores, face matching, quality metrics)
+CREATE TABLE IF NOT EXISTS fundi_verification_evidence (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  fundi_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  evidence_type VARCHAR(100) NOT NULL, -- ocr_id, ocr_selfie, face_match, liveness, location_gps, payment_verify
+  confidence_score DECIMAL(5,2),
+  score_details JSONB,
+  passed BOOLEAN,
+  rejection_reason TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fundi_verification_evidence_fundi_id ON fundi_verification_evidence(fundi_id);
+
+-- Fundi fraud and anti-cheating logs
+CREATE TABLE IF NOT EXISTS fundi_fraud_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  fundi_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  fraud_type VARCHAR(100) NOT NULL, -- duplicate_id, duplicate_phone, name_change_attempt, location_mismatch, multiple_registrations, etc
+  details JSONB,
+  severity VARCHAR(50), -- low, medium, high, critical
+  action_taken VARCHAR(100), -- flagged, blocked, review_required, etc
+  admin_reviewed BOOLEAN DEFAULT false,
+  admin_notes TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fundi_fraud_logs_fundi_id ON fundi_fraud_logs(fundi_id);
+CREATE INDEX IF NOT EXISTS idx_fundi_fraud_logs_severity ON fundi_fraud_logs(severity);
 
 -- Insert default service categories
 INSERT INTO service_categories (name, description, icon) VALUES

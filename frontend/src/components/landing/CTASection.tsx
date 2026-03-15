@@ -1,7 +1,7 @@
 import { motion } from "framer-motion";
 import { ArrowRight, Briefcase } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 
 const CTASection = () => {
   return (
@@ -25,12 +25,22 @@ const CTASection = () => {
                 Get connected with verified professionals in minutes. 
                 Fast, reliable, and secure.
               </p>
-              <Link to="/auth?mode=signup">
+              <button
+                onClick={() => {
+                  // Clear any existing auth token so users always land on signup
+                  try {
+                    localStorage.removeItem('auth_token');
+                  } catch (e) {}
+                  // navigate to signup
+                  window.location.href = '/auth?mode=signup';
+                }}
+                className="inline-flex items-center gap-2"
+              >
                 <Button variant="glass" size="lg" className="bg-white/20 hover:bg-white/30 text-white border-white/30">
                   Get Started Free
                   <ArrowRight className="w-5 h-5" />
                 </Button>
-              </Link>
+              </button>
             </div>
           </motion.div>
 
