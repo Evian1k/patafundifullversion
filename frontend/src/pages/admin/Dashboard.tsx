@@ -4,6 +4,7 @@ import { Users, Shield, Briefcase, TrendingUp, AlertCircle, Clock } from "lucide
 import { Card } from "@/components/ui/card";
 import { apiClient } from "@/lib/api";
 import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import AdminLayout from "@/components/admin/AdminLayout";
 
 interface DashboardStats {
   totalUsers: number;
@@ -97,7 +98,8 @@ export default function AdminDashboard() {
   );
 
   return (
-    <div className="p-8 space-y-8">
+    <AdminLayout>
+      <div className="p-8 space-y-8">
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
         <div>
@@ -233,6 +235,7 @@ export default function AdminDashboard() {
           </div>
         </Card>
       </motion.div>
-    </div>
+      </div>
+    </AdminLayout>
   );
 }

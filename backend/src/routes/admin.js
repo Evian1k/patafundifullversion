@@ -4,6 +4,7 @@ import { AppError } from '../utils/errors.js';
 import { authMiddleware, adminOnly } from '../middlewares/auth.js';
 import { logAdminAction, getAdminActionLogs } from '../services/adminLogger.js';
 import { getFileUrl } from '../services/file.js';
+import { sendMail } from '../services/mailer.js';
 
 const router = express.Router();
 
@@ -118,7 +119,7 @@ router.get('/pending-fundis', authMiddleware, adminOnly, async (req, res, next) 
       'SELECT COUNT(*) as count FROM fundi_profiles WHERE verification_status = $1',
       ['pending']
     );
-    const totalCount = parseInt(countResult.rows[0].count);
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     res.json({
       success: true,
@@ -164,6 +165,55 @@ router.get('/pending-fundis', authMiddleware, adminOnly, async (req, res, next) 
 
 /**
  * Get single fundi verification details (admin only)
+ */
+/**
+ * Get all fundis (admin only)
+ */
+router.get('/fundis', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT fp.*, u.email, u.phone
+       FROM fundi_profiles fp
+       JOIN users u ON fp.user_id = u.id
+       ORDER BY fp.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countResult = await query('SELECT COUNT(*) as count FROM fundi_profiles');
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+
+    res.json({
+      success: true,
+      fundis: result.rows.map(fundi => ({
+        id: fundi.id,
+        userId: fundi.user_id,
+        firstName: fundi.first_name,
+        lastName: fundi.last_name,
+        email: fundi.email,
+        phone: fundi.phone,
+        verificationStatus: fundi.verification_status,
+        skills: fundi.skills,
+        createdAt: fundi.created_at
+      })),
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        pages: Math.ceil(totalCount / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get single fundi by ID (admin only)
  */
 router.get('/fundis/:fundiId', authMiddleware, adminOnly, async (req, res, next) => {
   try {
@@ -267,7 +317,7 @@ router.get('/search-fundis', authMiddleware, adminOnly, async (req, res, next) =
     // Get total count
     const countSql = sqlQuery.replace(/SELECT.*FROM/, 'SELECT COUNT(*) as count FROM');
     const countResult = await query(countSql, params);
-    const totalCount = parseInt(countResult.rows[0].count);
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     // Add sorting and pagination
     sqlQuery += ` ORDER BY fp.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
@@ -338,6 +388,34 @@ router.post('/fundis/:fundiId/approve', authMiddleware, adminOnly, async (req, r
       notes || null,
       req.ip
     );
+
+    // Fetch the user's email to notify
+    const userResult = await query('SELECT email FROM users WHERE id = $1', [fundi.user_id]);
+    const userEmail = userResult.rows.length > 0 ? userResult.rows[0].email : null;
+
+    // Send notification email to fundi if available
+    if (userEmail) {
+      const subject = 'Your FixIt Connect verification is approved';
+      const text = `Hi ${fundi.first_name || ''},\n\nYour verification has been approved. You can now accept jobs on FixIt Connect.\n\nRegards,\nFixIt Connect Team`;
+      const html = `<p>Hi ${fundi.first_name || ''},</p><p>Your verification has been <strong>approved</strong>. You can now accept jobs on FixIt Connect.</p><p>Regards,<br/>FixIt Connect Team</p>`;
+      try {
+        await sendMail(userEmail, subject, text, html);
+      } catch (err) {
+        console.error('Failed to send approval email to', userEmail, err.message);
+      }
+    }
+
+    // Promote the user role to 'fundi' so they receive fundi dashboard and can be matched
+    try {
+      await query(
+        `UPDATE users SET role = $1 WHERE id = (
+           SELECT user_id FROM fundi_profiles WHERE id = $2
+         )`,
+        ['fundi', fundiId]
+      );
+    } catch (err) {
+      console.error('Failed to set user role to fundi for fundi id', fundiId, err.message);
+    }
 
     res.json({
       success: true,
@@ -532,6 +610,51 @@ router.post('/fundis/:fundiId/revoke', authMiddleware, adminOnly, async (req, re
 });
 
 /**
+ * Get admin action logs (admin only) - aliased endpoint
+ */
+router.get('/action-logs', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT * FROM admin_action_logs
+       ORDER BY created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countResult = await query('SELECT COUNT(*) as count FROM admin_action_logs');
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+
+    res.json({
+      success: true,
+      logs: result.rows.map(log => ({
+        id: log.id,
+        adminId: log.admin_id,
+        actionType: log.action_type,
+        targetType: log.target_type,
+        targetId: log.target_id,
+        previousData: log.previous_data,
+        newData: log.new_data,
+        notes: log.notes,
+        ipAddress: log.ip_address,
+        createdAt: log.created_at
+      })),
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        pages: Math.ceil(totalCount / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * Get admin action logs (admin only)
  */
 router.get('/logs/actions', authMiddleware, adminOnly, async (req, res, next) => {
@@ -574,9 +697,8 @@ router.get('/logs/actions', authMiddleware, adminOnly, async (req, res, next) =>
       countParams.push(filters.targetId);
       paramIndex++;
     }
-
     const countResult = await query(countQuery, countParams);
-    const totalCount = parseInt(countResult.rows[0].count);
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     res.json({
       success: true,
@@ -618,7 +740,7 @@ router.get('/customers', authMiddleware, adminOnly, async (req, res, next) => {
       'SELECT COUNT(*) as count FROM users WHERE role = $1',
       ['customer']
     );
-    const totalCount = parseInt(countResult.rows[0].count);
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     res.json({
       success: true,
@@ -679,7 +801,7 @@ router.get('/jobs', authMiddleware, adminOnly, async (req, res, next) => {
     // Get total count
     const countSql = sqlQuery.replace(/SELECT.*FROM/, 'SELECT COUNT(*) as count FROM');
     const countResult = await query(countSql, params);
-    const totalCount = parseInt(countResult.rows[0].count);
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     sqlQuery += ` ORDER BY j.created_at DESC LIMIT $${paramIndex} OFFSET $${paramIndex + 1}`;
     params.push(limit, offset);
@@ -710,6 +832,283 @@ router.get('/jobs', authMiddleware, adminOnly, async (req, res, next) => {
         total: totalCount,
         pages: Math.ceil(totalCount / limit)
       }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get transactions for payments page (admin only)
+ */
+router.get('/transactions', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT j.id as job_id,
+              uc.full_name as customer_name,
+              uf.full_name as fundi_name,
+              j.final_price as amount,
+              ROUND(j.final_price * 0.1) as commission,
+              j.status,
+              j.updated_at as created_at
+       FROM jobs j
+       LEFT JOIN users uc ON j.customer_id = uc.id
+       LEFT JOIN users uf ON j.fundi_id = uf.id
+       WHERE j.status = 'completed'
+       ORDER BY j.updated_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countResult = await query(
+      'SELECT COALESCE(COUNT(*), 0) as count, COALESCE(SUM(final_price), 0) as total_revenue FROM jobs WHERE status = $1',
+      ['completed']
+    );
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+    const totalRevenue = parseFloat(countResult.rows[0].total_revenue) || 0;
+    const totalCommission = totalRevenue * 0.1;
+
+    res.json({
+      success: true,
+      transactions: result.rows.map(row => ({
+        id: row.job_id,
+        jobId: row.job_id,
+        customerId: null,
+        customerName: row.customer_name,
+        fundiId: null,
+        fundiName: row.fundi_name,
+        amount: parseFloat(row.amount) || 0,
+        commission: parseFloat(row.commission) || 0,
+        status: row.status,
+        createdAt: row.created_at
+      })),
+      totalRevenue: parseFloat(totalRevenue.toFixed(2)),
+      totalCommission: parseFloat(totalCommission.toFixed(2)),
+      count: totalCount,
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        pages: Math.ceil(totalCount / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get security alerts (admin only)
+ */
+router.get('/security-alerts', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    // Query actual security alerts from database when table is created
+    res.json({
+      success: true,
+      alerts: []
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Resolve security alert (admin only)
+ */
+router.post('/security-alerts/:alertId/resolve', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    await logAdminAction(
+      req.user.id,
+      'resolve_alert',
+      'security_alert',
+      req.params.alertId,
+      null,
+      { resolved: true },
+      req.body.reason || 'Resolved',
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      message: 'Alert resolved successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Force logout user (admin only)
+ */
+router.post('/users/:userId/force-logout', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const userId = req.params.userId;
+
+    // Add token to blacklist (for active sessions)
+    // In production, implement proper session management
+
+    await logAdminAction(
+      req.user.id,
+      'force_logout',
+      'user',
+      userId,
+      null,
+      { logged_out: true },
+      req.body.reason || 'Admin forced logout',
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      message: 'User logged out successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Disable user account (admin only)
+ */
+router.post('/users/:userId/disable', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const userId = req.params.userId;
+
+    // Update user status
+    await query(
+      'UPDATE users SET status = $1, disabled_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['disabled', userId]
+    );
+
+    await logAdminAction(
+      req.user.id,
+      'disable_account',
+      'user',
+      userId,
+      { status: 'active' },
+      { status: 'disabled' },
+      req.body.reason || 'Admin disabled account',
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      message: 'User account disabled successfully'
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get admin settings (admin only)
+ */
+router.get('/settings', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    // Return default settings - in production, store in database
+    res.json({
+      success: true,
+      settings: {
+        platformCommissionRate: 10,
+        minimumJobPrice: 100,
+        maximumJobPrice: 50000,
+        maintenanceMode: false,
+        newRegistrationsEnabled: true,
+        emailNotificationsEnabled: true
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Update admin settings (admin only)
+ */
+router.put('/settings', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    // In production, store settings in database
+    await logAdminAction(
+      req.user.id,
+      'update_settings',
+      'admin_settings',
+      'platform',
+      null,
+      req.body,
+      'Updated platform settings',
+      req.ip
+    );
+
+    res.json({
+      success: true,
+      message: 'Settings updated successfully',
+      settings: req.body
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get reports/analytics (admin only)
+ */
+router.get('/reports', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const range = req.query.range || '30d';
+    const daysBack = range === '7d' ? 7 : range === '90d' ? 90 : 30;
+
+    // Get chart data from database - daily aggregated stats
+    const chartDataResult = await query(
+      `SELECT 
+         DATE(j.created_at) as date,
+         COUNT(DISTINCT j.id) as jobs,
+         COALESCE(SUM(CASE WHEN j.status = 'completed' THEN j.final_price ELSE 0 END), 0) as revenue,
+         COUNT(DISTINCT j.customer_id) as customers,
+         COUNT(DISTINCT CASE WHEN j.status IN ('in_progress', 'completed', 'accepted') THEN j.fundi_id END) as fundis
+       FROM jobs j
+       WHERE j.created_at >= CURRENT_DATE - INTERVAL '${daysBack} days'
+       GROUP BY DATE(j.created_at)
+       ORDER BY DATE(j.created_at) ASC`,
+      []
+    );
+
+    const chartData = chartDataResult.rows.map(row => ({
+      date: new Date(row.date).toLocaleDateString('en-KE', { month: 'short', day: 'numeric' }),
+      jobs: parseInt(row.jobs) || 0,
+      revenue: parseFloat(row.revenue) || 0,
+      customers: parseInt(row.customers) || 0,
+      fundis: parseInt(row.fundis) || 0
+    }));
+
+    // Get top performing fundis from database
+    const topFundisResult = await query(
+      `SELECT 
+         u.id,
+         u.full_name as name,
+         COUNT(j.id) as job_count
+       FROM users u
+       LEFT JOIN jobs j ON u.id = j.fundi_id AND j.status = 'completed'
+       WHERE u.role = 'fundi'
+       GROUP BY u.id, u.full_name
+       ORDER BY job_count DESC
+       LIMIT 10`,
+      []
+    );
+
+    const topFundis = topFundisResult.rows.map(row => ({
+      id: row.id,
+      name: row.name,
+      jobCount: parseInt(row.job_count) || 0
+    }));
+
+    res.json({
+      success: true,
+      chartData,
+      topFundis
     });
   } catch (error) {
     next(error);

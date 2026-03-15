@@ -2,6 +2,9 @@ import { verifyToken } from '../utils/jwt.js';
 import { query } from '../db.js';
 import { AppError } from '../utils/errors.js';
 
+// In-memory timers for job request expirations: jobRequestId -> timeout
+const jobRequestTimers = new Map();
+
 // Keep an in-memory mapping userId -> socketId and socketId -> userId
 let ioInstance = null;
 const userSocketMap = new Map();
@@ -107,16 +110,31 @@ export default function initRealtime(io) {
         const { jobId, accept } = payload || {};
         if (!jobId) return;
 
-        // ensure job exists and is assigned to this fundi (or was matched to them)
+        // ensure job exists
         const res = await query('SELECT * FROM jobs WHERE id = $1', [jobId]);
         if (res.rows.length === 0) return;
         const job = res.rows[0];
 
         if (!accept) {
-          // mark job as searching again
-          await query('UPDATE jobs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', ['requested', jobId]);
-          // notify customer
-          emitToUser(job.customer_id, 'job:rejected', { jobId });
+          // Mark the specific job_request as declined for this fundi
+          await query(
+            `UPDATE job_requests SET status = 'declined' WHERE job_id = $1 AND fundi_id = $2 AND status = 'sent'`,
+            [jobId, userId]
+          );
+
+          // notify customer that this fundi declined (customer may still be waiting)
+          emitToUser(job.customer_id, 'job:request:declined', { jobId, fundiId: userId });
+          socket.emit('fundi:response:ok', { jobId, accepted: false });
+          return;
+        }
+
+        // CRITICAL: Check fundi is verified before accepting
+        const fundiVerify = await query(
+          'SELECT verification_status FROM fundi_profiles WHERE user_id = $1',
+          [userId]
+        );
+        if (fundiVerify.rows.length === 0 || fundiVerify.rows[0].verification_status !== 'approved') {
+          socket.emit('fundi:response:failed', { message: 'Your account is not yet approved. Please complete verification.' });
           return;
         }
 
@@ -130,7 +148,45 @@ export default function initRealtime(io) {
           return;
         }
 
-        // accept job: set fundi_id and status accepted
+        // Verify there's an active job_request for this fundi and job
+        const jrRes = await query(
+          `SELECT id, status, expires_at FROM job_requests WHERE job_id = $1 AND fundi_id = $2 LIMIT 1`,
+          [jobId, userId]
+        );
+
+        if (jrRes.rows.length === 0) {
+          socket.emit('fundi:response:failed', { message: 'No active request for this job' });
+          return;
+        }
+
+        const jr = jrRes.rows[0];
+        if (jr.status !== 'sent' || new Date(jr.expires_at) < new Date()) {
+          socket.emit('fundi:response:failed', { message: 'Request expired or not available' });
+          return;
+        }
+
+        // CRITICAL: Check if another fundi already accepted (first-accept-wins lock)
+        const accepted = await query(
+          'SELECT id FROM job_requests WHERE job_id = $1 AND status = $2 LIMIT 1',
+          [jobId, 'accepted']
+        );
+        if (accepted.rows.length > 0) {
+          socket.emit('fundi:response:failed', { message: 'Another fundi already accepted this job' });
+          return;
+        }
+
+        // Accept: set this job_request to accepted and mark other requests expired
+        await query('UPDATE job_requests SET status = $1 WHERE id = $2', ['accepted', jr.id]);
+        await query('UPDATE job_requests SET status = $1 WHERE job_id = $2 AND id != $3', ['expired', jobId, jr.id]);
+
+        // Clear timer if any
+        const timer = jobRequestTimers.get(jr.id);
+        if (timer) {
+          clearTimeout(timer);
+          jobRequestTimers.delete(jr.id);
+        }
+
+        // assign fundi and set job accepted
         await query(
           `UPDATE jobs SET fundi_id = $1, status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
           [userId, jobId]
@@ -139,9 +195,40 @@ export default function initRealtime(io) {
         // notify customer
         emitToUser(job.customer_id, 'job:accepted', { jobId, fundiId: userId });
         // ack to fundi
-        socket.emit('fundi:response:ok', { jobId });
+        socket.emit('fundi:response:ok', { jobId, accepted: true });
       } catch (err) {
         console.error('fundi:response error', err);
+      }
+    });
+
+    // In-app chat (job-scoped)
+    socket.on('chat:send', async (payload) => {
+      // payload: { jobId, content }
+      const userId = socketUserMap.get(socket.id);
+      if (!userId) return;
+      try {
+        const { jobId, content } = payload || {};
+        if (!jobId || !content) return;
+
+        // ensure job exists and user is participant
+        const jobRes = await query('SELECT customer_id, fundi_id FROM jobs WHERE id = $1', [jobId]);
+        if (jobRes.rows.length === 0) return;
+        const job = jobRes.rows[0];
+        if (job.customer_id !== userId && job.fundi_id !== userId) return;
+
+        const insert = await query(
+          `INSERT INTO messages (job_id, sender_id, content, created_at) VALUES ($1,$2,$3,NOW()) RETURNING *`,
+          [jobId, userId, content]
+        );
+
+        const message = insert.rows[0];
+
+        // emit to the other participant
+        const otherId = job.customer_id === userId ? job.fundi_id : job.customer_id;
+        if (otherId) emitToUser(otherId, 'chat:message', { jobId, message });
+        socket.emit('chat:sent', { ok: true, message });
+      } catch (e) {
+        console.error('chat:send error', e);
       }
     });
 

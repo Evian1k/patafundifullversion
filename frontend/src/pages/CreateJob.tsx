@@ -806,7 +806,7 @@ const CreateJob = () => {
                         </p>
                       )}
                       
-                      {jobData.latitude && jobData.longitude && (
+                      {jobData.latitude != null && jobData.longitude != null && (
                         <>
                           <p className="text-xs text-muted-foreground">
                             📍 {jobData.locationName || jobData.location}

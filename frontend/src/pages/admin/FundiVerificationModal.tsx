@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Check, AlertTriangle, MapPin, Phone, Mail, FileText, ZoomIn } from "lucide-react";
 import { Card } from "@/components/ui/card";
@@ -12,11 +12,70 @@ interface FundiVerificationModalProps {
   onClose: () => void;
 }
 
+// Simple Leaflet map component
+function MapComponent({ latitude, longitude, address }: { latitude: number; longitude: number; address?: string }) {
+  const mapRef = useRef<HTMLDivElement>(null);
+  const [mapInitialized, setMapInitialized] = useState(false);
+
+  useEffect(() => {
+    const initMap = async () => {
+      if (!mapRef.current || mapInitialized) return;
+
+      // Load Leaflet if not already loaded
+      if (typeof window !== 'undefined' && !window.L) {
+        const link = document.createElement('link');
+        link.href = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css';
+        link.rel = 'stylesheet';
+        document.head.appendChild(link);
+
+        const script = document.createElement('script');
+        script.src = 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js';
+        script.onload = () => {
+          setTimeout(() => createMap(), 100);
+        };
+        document.body.appendChild(script);
+      } else {
+        createMap();
+      }
+    };
+
+    const createMap = () => {
+      if (!mapRef.current || !window.L) return;
+
+      try {
+        const map = window.L.map(mapRef.current).setView([latitude, longitude], 15);
+
+        window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '© OpenStreetMap contributors',
+          maxZoom: 19,
+        }).addTo(map);
+
+        const marker = window.L.marker([latitude, longitude]).addTo(map);
+        (marker as any).bindPopup(`<div class="text-sm"><strong>${address || 'Fundi Location'}</strong></div>`);
+
+        setMapInitialized(true);
+      } catch (error) {
+        console.error('Error initializing map:', error);
+      }
+    };
+
+    initMap();
+  }, [latitude, longitude, address, mapInitialized]);
+
+  return (
+    <div
+      ref={mapRef}
+      className="w-full h-64 rounded-lg border border-gray-300 bg-gray-100"
+    />
+  );
+}
+
 export default function FundiVerificationModal({ fundi, onClose }: FundiVerificationModalProps) {
   const [loading, setLoading] = useState(false);
   const [action, setAction] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [zoomedImage, setZoomedImage] = useState<string | null>(null);
+  const mapContainerRef = useRef<HTMLDivElement>(null);
 
   const handleApprove = async () => {
     setLoading(true);
@@ -100,7 +159,12 @@ export default function FundiVerificationModal({ fundi, onClose }: FundiVerifica
             <h2 className="text-2xl font-bold">
               {fundi.firstName} {fundi.lastName}
             </h2>
-            <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded">
+            <button 
+              onClick={onClose} 
+              className="p-1 hover:bg-gray-100 rounded"
+              aria-label="Close modal"
+              title="Close"
+            >
               <X className="w-6 h-6" />
             </button>
           </div>
@@ -235,17 +299,22 @@ export default function FundiVerificationModal({ fundi, onClose }: FundiVerifica
                 <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
                   <MapPin className="w-5 h-5" /> Location
                 </h3>
-                <p className="text-sm text-muted-foreground mb-2">
+                <p className="text-sm text-muted-foreground mb-4">
                   {fundi.locationAddress || fundi.locationCity || "Location info"}
                 </p>
-                <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                <MapComponent
+                  latitude={fundi.latitude}
+                  longitude={fundi.longitude}
+                  address={fundi.locationAddress || fundi.locationCity}
+                />
+                <div className="mt-3 flex gap-2">
                   <a
                     href={`https://maps.google.com/?q=${fundi.latitude},${fundi.longitude}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="text-primary hover:underline flex items-center gap-2"
+                    className="text-sm text-primary hover:underline flex items-center gap-1"
                   >
-                    <MapPin className="w-4 h-4" /> View on Google Maps
+                    <MapPin className="w-3 h-3" /> Open in Google Maps
                   </a>
                 </div>
               </div>
@@ -379,6 +448,8 @@ export default function FundiVerificationModal({ fundi, onClose }: FundiVerifica
               <button
                 onClick={() => setZoomedImage(null)}
                 className="absolute -top-10 right-0 text-white hover:bg-white/20 p-2 rounded"
+                aria-label="Close zoomed image"
+                title="Close"
               >
                 <X className="w-6 h-6" />
               </button>

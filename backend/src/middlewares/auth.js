@@ -1,10 +1,11 @@
 import { verifyToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
+import { query } from '../db.js';
 
-export const authMiddleware = (req, res, next) => {
+export const authMiddleware = async (req, res, next) => {
   try {
     const authHeader = req.headers.authorization;
-    
+
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       throw new AppError('No token provided', 401);
     }
@@ -14,6 +15,17 @@ export const authMiddleware = (req, res, next) => {
 
     if (!decoded) {
       throw new AppError('Invalid or expired token', 401);
+    }
+
+    // Check token blacklist
+    try {
+      const black = await query('SELECT id FROM token_blacklist WHERE token = $1 AND (expires_at IS NULL OR expires_at > NOW())', [token]);
+      if (black.rows.length > 0) {
+        throw new AppError('Token revoked', 401);
+      }
+    } catch (err) {
+      // If DB check fails, log and continue to avoid locking out users on transient DB errors
+      console.error('Token blacklist check failed:', err.message);
     }
 
     req.user = decoded;
