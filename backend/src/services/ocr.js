@@ -1,5 +1,6 @@
 import Tesseract from 'tesseract.js';
 import sharp from 'sharp';
+import fs from 'fs/promises';
 
 /**
  * Extract text from image using OCR
@@ -15,7 +16,7 @@ export const extractTextFromImage = async (imagePath) => {
       .toFile(processedPath);
 
     // Run OCR
-    const { data: { text } } = await Tesseract.recognize(
+    const { data } = await Tesseract.recognize(
       processedPath,
       'eng',
       {
@@ -23,10 +24,20 @@ export const extractTextFromImage = async (imagePath) => {
       }
     );
 
-    return text;
+    const text = data?.text || '';
+    const confidence = typeof data?.confidence === 'number' ? data.confidence : null;
+
+    // Best-effort cleanup of processed image
+    try {
+      await fs.unlink(processedPath);
+    } catch {
+      // ignore
+    }
+
+    return { text, confidence };
   } catch (error) {
     console.error('OCR error:', error);
-    return '';
+    return { text: '', confidence: null };
   }
 };
 
@@ -36,37 +47,85 @@ export const extractTextFromImage = async (imagePath) => {
 export const extractIdNumber = (text) => {
   if (!text) return null;
 
-  // Kenya ID format (6 digits)
-  const kenyaMatch = text.match(/\b\d{6}\b/);
-  if (kenyaMatch) return kenyaMatch[0];
+  // Kenya national ID is typically 8 digits. Prefer the most plausible match.
+  const kenya8 = text.match(/\b\d{8}\b/);
+  if (kenya8) return kenya8[0];
+
+  // General numeric ID: 7-10 digits (avoid grabbing short numbers that are often noise)
+  const kenyaGeneric = text.match(/\b\d{7,10}\b/);
+  if (kenyaGeneric) return kenyaGeneric[0];
 
   // Passport format (1-2 letters + digits)
   const passportMatch = text.match(/[A-Z]{1,2}\d{6,7}/);
   if (passportMatch) return passportMatch[0];
 
   // General format: any sequence of digits
-  const digitsMatch = text.match(/\b\d{5,10}\b/);
+  const digitsMatch = text.match(/\b\d{5,20}\b/);
   if (digitsMatch) return digitsMatch[0];
 
   return null;
 };
 
 /**
- * Extract name from text (usually last word or multi-word sequence)
+ * Extract the best-matching name candidate from OCR text.
+ * Kenyan IDs often contain noise; picking "last words" is very unreliable.
  */
-export const extractName = (text) => {
+export const extractName = (text, providedName = null) => {
   if (!text) return null;
 
-  // Split into words and filter out very short words
-  const words = text
-    .split(/\s+/)
-    .filter(w => w.length > 2 && /^[A-Za-z\s-]+$/.test(w))
-    .map(w => w.trim());
+  const stop = new Set([
+    'REPUBLIC', 'OF', 'KENYA', 'IDENTITY', 'CARD', 'NATIONAL', 'SERIAL', 'NUMBER',
+    'SEX', 'DATE', 'BIRTH', 'DISTRICT', 'COUNTY', 'PLACE', 'ISSUE', 'SIGNATURE',
+  ]);
 
-  if (words.length === 0) return null;
+  const providedTokens = normalizeText(providedName || '')
+    .split(' ')
+    .filter(Boolean);
+  const providedSet = new Set(providedTokens);
 
-  // Take last 1-3 words as name
-  return words.slice(-3).join(' ').toUpperCase();
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => normalizeText(l))
+    .map((l) => l.replace(/\s+/g, ' ').trim())
+    .filter((l) => l.length >= 5);
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const line of lines) {
+    // Only keep alpha-ish lines that look like a name (2-4 words)
+    const cleaned = line.replace(/[^A-Z\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!cleaned) continue;
+    const tokens = cleaned.split(' ').filter(Boolean);
+    if (tokens.length < 2 || tokens.length > 5) continue;
+    if (tokens.some((t) => stop.has(t))) continue;
+    if (tokens.every((t) => t.length < 3)) continue;
+
+    // Score by token overlap with provided name (order-insensitive).
+    let score = 0;
+    if (providedSet.size > 0) {
+      const matches = tokens.filter((t) => providedSet.has(t)).length;
+      score = matches / Math.max(providedSet.size, tokens.length);
+    } else {
+      // If we don't have provided name, fall back to "looks like a name"
+      score = 0.2 + Math.min(tokens.length, 4) * 0.1;
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = tokens.slice(0, 4).join(' ');
+    }
+  }
+
+  // Fallback: pick first plausible alpha sequence from the whole text
+  if (!best) {
+    const tokens = normalizeText(text)
+      .split(' ')
+      .filter((t) => t.length >= 3 && /^[A-Z-]+$/.test(t) && !stop.has(t));
+    if (tokens.length >= 2) best = tokens.slice(0, 4).join(' ');
+  }
+
+  return best ? best.toUpperCase() : null;
 };
 
 /**
@@ -120,9 +179,9 @@ export const idMatches = (extractedId, providedId) => {
  */
 export const verifyOCRData = async (imagePath, providedName, providedId) => {
   try {
-    const extractedText = await extractTextFromImage(imagePath);
+    const { text: extractedText, confidence } = await extractTextFromImage(imagePath);
     const extractedId = extractIdNumber(extractedText);
-    const extractedName = extractName(extractedText);
+    const extractedName = extractName(extractedText, providedName);
 
     const nameValid = nameMatches(extractedName, providedName);
     const idValid = idMatches(extractedId, providedId);
@@ -134,6 +193,7 @@ export const verifyOCRData = async (imagePath, providedName, providedId) => {
       nameValid,
       idValid,
       extractedText,
+      confidenceScore: confidence,
       issues: [
         !nameValid && `Name mismatch: extracted "${extractedName}", provided "${providedName}"`,
         !idValid && `ID mismatch: extracted "${extractedId}", provided "${providedId}"`

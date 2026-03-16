@@ -10,6 +10,9 @@ NC='\033[0m'
 API="http://localhost:5000/api"
 ADMIN_EMAIL="emmanuelevian@gmail.com"
 ADMIN_PASSWORD="emmanuelevian12k@Q"
+RUN_ID=$(date +%s)
+FUNDI_EMAIL="simplewf+$RUN_ID@fundi.com"
+CUSTOMER_EMAIL="simpletest+$RUN_ID@customer.com"
 
 echo -e "${YELLOW}=== Simplified Fundi Workflow Test ===${NC}\n"
 
@@ -31,7 +34,7 @@ fi
 echo -e "\n${YELLOW}[2] Fundi Signup...${NC}"
 FUNDI=$(curl -s -X POST $API/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"simplewf@fundi.com","password":"Password123","fullName":"Simple Workflow Fundi"}')
+  -d "{\"email\":\"$FUNDI_EMAIL\",\"password\":\"Password123\",\"fullName\":\"Simple Workflow Fundi\"}")
 FUNDI_ID=$(echo $FUNDI | jq -r '.user.id')
 FUNDI_TOKEN=$(echo $FUNDI | jq -r '.token')
 FUNDI_ROLE=$(echo $FUNDI | jq -r '.user.role')
@@ -53,7 +56,7 @@ fi
 echo -e "\n${YELLOW}[4] Customer Signup...${NC}"
 CUSTOMER=$(curl -s -X POST $API/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"simpletest@customer.com","password":"Password123","fullName":"Test Customer"}')
+  -d "{\"email\":\"$CUSTOMER_EMAIL\",\"password\":\"Password123\",\"fullName\":\"Test Customer\"}")
 CUSTOMER_ID=$(echo $CUSTOMER | jq -r '.user.id')
 CUSTOMER_TOKEN=$(echo $CUSTOMER | jq -r '.token')
 

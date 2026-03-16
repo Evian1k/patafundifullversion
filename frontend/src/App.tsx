@@ -9,7 +9,9 @@ import Auth from "./pages/Auth";
 import Dashboard from "./pages/Dashboard";
 import CreateJob from "./pages/CreateJob";
 import FundiRegister from "./pages/FundiRegister";
+import FundiPendingApproval from "./pages/FundiPendingApproval";
 import { FundiDashboard } from "./pages/FundiDashboard";
+import FundiJob from "./pages/FundiJob";
 import Settings from "./pages/Settings";
 import JobTracking from "./pages/JobTracking";
 import NotFound from "./pages/NotFound";
@@ -73,6 +75,8 @@ const App = () => {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/create-job" element={<CreateJob />} />
             <Route path="/fundi" element={<FundiDashboard />} />
+            <Route path="/fundi/pending" element={<FundiPendingApproval />} />
+            <Route path="/fundi/job/:jobId" element={<FundiJob />} />
             <Route path="/job/:jobId/tracking" element={<JobTracking />} />
             <Route path="/fundi/register" element={<FundiRegister />} />
             <Route path="/settings" element={<Settings />} />

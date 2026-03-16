@@ -20,10 +20,12 @@ import AdminLayout from "@/components/admin/AdminLayout";
 interface Customer {
   id: string;
   email: string;
-  fullName: string;
-  phone: string;
+  fullName: string | null;
+  phone: string | null;
   jobCount: number;
   createdAt: string;
+  status?: string | null;
+  emailVerified?: boolean;
 }
 
 interface PaginationInfo {
@@ -67,6 +69,19 @@ export default function CustomerManagement() {
       console.error("Error fetching customers:", error);
       setCustomers([]);
       setPagination({ page, limit: 10, total: 0, pages: 1 });
+      const msg = error instanceof Error ? error.message : "";
+      if (
+        msg.toLowerCase().includes("access denied") ||
+        msg.toLowerCase().includes("authentication required") ||
+        msg.toLowerCase().includes("invalid or expired token") ||
+        msg.toLowerCase().includes("token revoked") ||
+        msg.toLowerCase().includes("user not found")
+      ) {
+        localStorage.removeItem("auth_token");
+        toast.error("Admin session expired. Please sign in again.");
+        navigate("/admin/login");
+        return;
+      }
       toast.error("Failed to load customers");
     } finally {
       setLoading(false);
@@ -75,6 +90,9 @@ export default function CustomerManagement() {
 
   useEffect(() => {
     fetchCustomers(1);
+    const id = window.setInterval(() => fetchCustomers(pagination.page), 15_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSearch = (e: React.FormEvent) => {
@@ -171,12 +189,12 @@ export default function CustomerManagement() {
                     <div className="flex items-center justify-between">
                       <div className="flex-1">
                         <div className="flex items-start gap-4">
-                          <div className="w-12 h-12 bg-gradient-to-br from-primary to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0">
-                            {customer.fullName.charAt(0).toUpperCase()}
+                              <div className="w-12 h-12 bg-gradient-to-br from-primary to-orange-600 rounded-full flex items-center justify-center text-white font-bold flex-shrink-0">
+                            {(customer.fullName || customer.email || "?").charAt(0).toUpperCase()}
                           </div>
                           <div className="flex-1 min-w-0">
                             <h3 className="text-lg font-semibold text-gray-900">
-                              {customer.fullName}
+                              {customer.fullName || customer.email}
                             </h3>
                             <div className="flex flex-wrap items-center gap-4 mt-2 text-sm text-gray-600">
                               <div className="flex items-center gap-1">
@@ -195,6 +213,15 @@ export default function CustomerManagement() {
                               <div className="text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded">
                                 {customer.jobCount} jobs
                               </div>
+                              {typeof customer.emailVerified === "boolean" && (
+                                <div
+                                  className={`text-xs px-2 py-1 rounded ${
+                                    customer.emailVerified ? "bg-green-100 text-green-700" : "bg-yellow-100 text-yellow-700"
+                                  }`}
+                                >
+                                  {customer.emailVerified ? "verified" : "unverified"}
+                                </div>
+                              )}
                               <div className="text-xs text-gray-500">
                                 Joined {formatDate(customer.createdAt)}
                               </div>

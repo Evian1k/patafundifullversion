@@ -526,6 +526,13 @@ const FundiRegister = () => {
   const [geoPermission, setGeoPermission] = useState<string | null>(null);
   const [coordsFromDevice, setCoordsFromDevice] = useState(false);
   const [userAdjustedLocation, setUserAdjustedLocation] = useState(false);
+  const geocodeSeqRef = useRef(0);
+
+  // Leaflet map refs for Step 4 (mirror CreateJob behavior)
+  const fundiMapElRef = useRef<HTMLDivElement | null>(null);
+  const fundiMapRef = useRef<any>(null);
+  const fundiMarkerRef = useRef<any>(null);
+  const fundiAccuracyCircleRef = useRef<any>(null);
 
   // Forward-geocoding search state
   const [searchQuery, setSearchQuery] = useState("");
@@ -577,6 +584,29 @@ const FundiRegister = () => {
   });
 
   const locationAutoCapturedRef = useRef(false);
+
+  // Optional prefill when user comes from /auth signup
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem("fundi_prefill");
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      localStorage.removeItem("fundi_prefill");
+
+      const fullName = typeof parsed?.fullName === "string" ? parsed.fullName.trim() : "";
+      const [firstName = "", ...rest] = fullName.split(/\s+/).filter(Boolean);
+      const lastName = rest.join(" ");
+
+      setData((prev) => ({
+        ...prev,
+        firstName: prev.firstName || firstName,
+        lastName: prev.lastName || lastName,
+        email: prev.email || (typeof parsed?.email === "string" ? parsed.email : ""),
+      }));
+    } catch {
+      // ignore
+    }
+  }, []);
 
   // Auto-capture location when user reaches Step 4 (first time)
   useEffect(() => {
@@ -1028,9 +1058,36 @@ const FundiRegister = () => {
 
   // Step 4: GPS Location
   // User can: 1) Click on map to select location, 2) Use device GPS as fallback
-  const setLocationFromCoords = async (latitude: number, longitude: number, source: 'map_click' | 'device_gps' = 'map_click') => {
+  const setLocationFromCoords = async (
+    latitude: number,
+    longitude: number,
+    source: 'map_click' | 'device_gps' = 'map_click',
+    meta?: { accuracy?: number | null; altitude?: number | null }
+  ) => {
     setLoading(true);
     try {
+      const seq = ++geocodeSeqRef.current;
+
+      // Update coords immediately so the map/marker moves right away.
+      setData((prev) => ({
+        ...prev,
+        latitude,
+        longitude,
+        accuracy:
+          typeof meta?.accuracy === 'number'
+            ? meta.accuracy
+            : source === 'device_gps'
+              ? prev.accuracy
+              : prev.accuracy,
+        altitude: typeof meta?.altitude === 'number' ? meta.altitude : prev.altitude,
+        capturedAt: Date.now(),
+        locationMismatchFlagged: false,
+        locationMismatchReason: "",
+      }));
+
+      setCoordsFromDevice(source === 'device_gps');
+      setUserAdjustedLocation(false);
+
       // reverse geocode (prefer Google if API key available)
       let displayName = "";
       let area = "";
@@ -1046,28 +1103,27 @@ const FundiRegister = () => {
         console.warn("Reverse geocode failed", e);
       }
 
-      setData((prev) => ({
-        ...prev,
-        latitude,
-        longitude,
-        accuracy: source === 'device_gps' ? 15 : 100, // estimate accuracy based on source
-        altitude: source === 'device_gps' ? 0 : null,
-        locationDisplayName: displayName,
-        locationArea: area,
-        locationEstate: estate,
-        locationCity: city,
-        capturedAt: Date.now(),
-        locationMismatchFlagged: false,
-        locationMismatchReason: "",
-      }));
-
-      setCoordsFromDevice(source === 'device_gps');
-      setUserAdjustedLocation(false);
+      // Only apply geocode results if this is still the latest location request.
+      if (seq === geocodeSeqRef.current) {
+        setData((prev) => ({
+          ...prev,
+          accuracy:
+            source === 'device_gps'
+              ? (typeof meta?.accuracy === 'number' ? meta.accuracy : prev.accuracy)
+              : (typeof meta?.accuracy === 'number' ? meta.accuracy : prev.accuracy),
+          altitude: typeof meta?.altitude === 'number' ? meta.altitude : prev.altitude,
+          locationDisplayName: displayName,
+          locationArea: area,
+          locationEstate: estate,
+          locationCity: city,
+        }));
+      }
 
       if (source === 'map_click') {
         toast.success(`✓ Location set: ${displayName || `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`}`);
       } else {
-        toast.success(`✓ Device GPS captured (accuracy: ±${15}m)`);
+        const acc = meta?.accuracy != null ? Math.round(meta.accuracy) : null;
+        toast.success(`✓ Device GPS captured${acc ? ` (accuracy: ±${acc}m)` : ''}`);
       }
     } catch (err) {
       console.error('setLocationFromCoords error', err);
@@ -1086,17 +1142,54 @@ const FundiRegister = () => {
     setLoading(true);
     const toastId = toast.loading("Getting device GPS location...");
     try {
-      const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-        navigator.geolocation.getCurrentPosition(resolve, reject, {
-          enableHighAccuracy: true,
-          timeout: 15000,
-          maximumAge: 0,
-        });
+      // On laptops/desktops, geolocation sometimes returns an early coarse fix.
+      // Collect a few samples (watchPosition) and pick the best accuracy.
+      const best = await new Promise<GeolocationPosition>((resolve, reject) => {
+        const samples: GeolocationPosition[] = [];
+        let settled = false;
+
+        const finish = (pos?: GeolocationPosition) => {
+          if (settled) return;
+          settled = true;
+          try {
+            if (watchId != null) navigator.geolocation.clearWatch(watchId);
+          } catch {
+            // ignore
+          }
+          if (pos) resolve(pos);
+          else if (samples.length > 0) {
+            const best = samples.reduce((a, b) => (a.coords.accuracy <= b.coords.accuracy ? a : b));
+            resolve(best);
+          } else {
+            reject(new Error("No GPS samples"));
+          }
+        };
+
+        const watchId = navigator.geolocation.watchPosition(
+          (pos) => {
+            samples.push(pos);
+            // If we got a decent fix quickly, finish early.
+            if (pos.coords.accuracy && pos.coords.accuracy <= 35 && samples.length >= 2) {
+              finish(pos);
+            }
+          },
+          (err) => {
+            if (samples.length > 0) finish();
+            else reject(err);
+          },
+          { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+        );
+
+        // Give it a few seconds to improve accuracy, then settle.
+        setTimeout(() => finish(), 6500);
       });
 
-      const { latitude, longitude } = position.coords;
+      const { latitude, longitude, accuracy, altitude } = best.coords;
       toast.dismiss(toastId);
-      await setLocationFromCoords(latitude, longitude, 'device_gps');
+      await setLocationFromCoords(latitude, longitude, 'device_gps', {
+        accuracy: typeof accuracy === 'number' ? accuracy : null,
+        altitude: typeof altitude === 'number' ? altitude : null,
+      });
     } catch (err: any) {
       console.error('captureLocation error', err);
       toast.dismiss(toastId);
@@ -1105,6 +1198,119 @@ const FundiRegister = () => {
       setLoading(false);
     }
   };
+
+  // Step 4 Leaflet map initialization + sync (same approach as customer CreateJob)
+  useEffect(() => {
+    if (step !== 4) return;
+    if (!leafletLoaded) return;
+    if (!fundiMapElRef.current) return;
+    const L = (window as any).L;
+    if (!L) return;
+
+    // init once per step visit
+    if (!fundiMapRef.current) {
+      const startLat = typeof data.latitude === "number" ? data.latitude : -1.2865;
+      const startLng = typeof data.longitude === "number" ? data.longitude : 36.8172;
+
+      const map = L.map(fundiMapElRef.current, {
+        center: [startLat, startLng],
+        zoom: 16,
+        zoomControl: true,
+        attributionControl: true,
+      });
+      L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19 }).addTo(map);
+
+      const marker = L.marker([startLat, startLng], { draggable: true }).addTo(map);
+      fundiMapRef.current = map;
+      fundiMarkerRef.current = marker;
+
+      // Click on map sets location
+      map.on("click", (e: any) => {
+        const { lat, lng } = e.latlng || {};
+        if (typeof lat === "number" && typeof lng === "number") {
+          setLocationFromCoords(lat, lng, "map_click");
+          setUserAdjustedLocation(true);
+          setCoordsFromDevice(false);
+        }
+      });
+
+      marker.on("dragend", (ev: any) => {
+        const pos = ev?.target?.getLatLng?.();
+        if (pos && typeof pos.lat === "number" && typeof pos.lng === "number") {
+          setLocationFromCoords(pos.lat, pos.lng, "map_click");
+          setUserAdjustedLocation(true);
+          setCoordsFromDevice(false);
+        }
+      });
+
+      // Invalidate size after layout settles (fixes grey tiles / wrong center).
+      const invalidate = () => {
+        try { map.invalidateSize(true); } catch {}
+      };
+      requestAnimationFrame(invalidate);
+      setTimeout(invalidate, 120);
+      setTimeout(invalidate, 420);
+    }
+
+    return () => {
+      // cleanup when leaving step 4
+      try {
+        if (fundiMapRef.current) {
+          fundiMapRef.current.remove();
+          fundiMapRef.current = null;
+          fundiMarkerRef.current = null;
+          fundiAccuracyCircleRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, leafletLoaded]);
+
+  // Sync marker/view + accuracy circle whenever coords change
+  useEffect(() => {
+    if (step !== 4) return;
+    const map = fundiMapRef.current;
+    const marker = fundiMarkerRef.current;
+    const L = (window as any).L;
+    if (!map || !marker || !L) return;
+    if (typeof data.latitude !== "number" || typeof data.longitude !== "number") return;
+
+    const lat = data.latitude;
+    const lng = data.longitude;
+    const z = coordsFromDevice ? 17 : 16;
+
+    try {
+      if (typeof map.flyTo === "function") map.flyTo([lat, lng], z, { animate: true, duration: 0.6 });
+      else map.setView([lat, lng], z);
+      marker.setLatLng([lat, lng]);
+      try { map.invalidateSize(true); } catch {}
+
+      // accuracy circle
+      const acc = typeof data.accuracy === "number" && Number.isFinite(data.accuracy) ? data.accuracy : null;
+      if (acc && acc > 0) {
+        const radius = Math.min(Math.max(acc, 5), 500);
+        if (!fundiAccuracyCircleRef.current) {
+          fundiAccuracyCircleRef.current = L.circle([lat, lng], {
+            radius,
+            color: "#3b82f6",
+            weight: 1,
+            fillColor: "#60a5fa",
+            fillOpacity: 0.15,
+          }).addTo(map);
+        } else {
+          fundiAccuracyCircleRef.current.setLatLng([lat, lng]);
+          fundiAccuracyCircleRef.current.setRadius(radius);
+        }
+      } else if (fundiAccuracyCircleRef.current) {
+        fundiAccuracyCircleRef.current.remove();
+        fundiAccuracyCircleRef.current = null;
+      }
+    } catch {
+      // ignore
+    }
+  }, [step, data.latitude, data.longitude, data.accuracy, coordsFromDevice]);
 
   const searchLocation = async (q?: string) => {
     const query = (q ?? searchQuery).trim();
@@ -1117,13 +1323,15 @@ const FundiRegister = () => {
     try {
       const key = (import.meta.env as any).VITE_GOOGLE_MAPS_API_KEY;
       if (key) {
-        const res = await fetch(`https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&key=${key}`);
+        const res = await fetch(
+          `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&components=country:KE&key=${key}`,
+        );
         const j = await res.json();
         const results = (j.results || []).slice(0, 5).map((r: any) => ({ display_name: r.formatted_address, lat: r.geometry.location.lat, lon: r.geometry.location.lng }));
         setSearchResults(results);
       } else {
         // Nominatim fallback
-        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=5`, {
+        const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&addressdetails=1&limit=5&countrycodes=ke`, {
           headers: { 'Accept-Language': 'en', 'User-Agent': 'FundiHub/1.0 (contact@fundihub.example)' },
         });
         const j = await res.json();
@@ -1139,7 +1347,7 @@ const FundiRegister = () => {
   };
 
   const handleStep4Next = () => {
-    if (!data.latitude || !data.longitude) {
+    if (data.latitude == null || data.longitude == null) {
       toast.error("GPS location required");
       return;
     }
@@ -1165,14 +1373,45 @@ const FundiRegister = () => {
         return;
       }
 
-      // First sign up the user
-      const signupResult = await apiClient.signup(
-        data.email,
-        data.password,
-        `${data.firstName} ${data.lastName}`
-      );
-
-      const userId = signupResult.user.id;
+      // Ensure the account exists and we have a token.
+      // - New users: /auth/signup (no OTP)
+      // - Existing users:
+      //    - if verified: login and continue
+      //    - if unverified (OTP registration): resend OTP and redirect to OTP screen
+      const fullName = `${data.firstName} ${data.lastName}`.trim();
+      try {
+        await apiClient.signup(data.email, data.password, fullName, "fundi");
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg.toLowerCase().includes("user already exists")) {
+          try {
+            await apiClient.login(data.email, data.password);
+          } catch (loginErr) {
+            const loginMsg = loginErr instanceof Error ? loginErr.message : "";
+            if (loginMsg.toLowerCase().includes("not verified")) {
+              // Trigger OTP resend (and set role to fundi_pending for onboarding)
+              await apiClient.register(data.email, data.password, fullName, data.phone || null, "fundi");
+              localStorage.setItem("pending_otp_email", data.email);
+              localStorage.setItem("pending_otp_purpose", "register");
+              // Pre-fill fundi register fields after OTP
+              try {
+                localStorage.setItem(
+                  "fundi_prefill",
+                  JSON.stringify({ fullName, email: data.email })
+                );
+              } catch {
+                // ignore
+              }
+              toast.error("Account exists but is not verified. Enter the OTP to continue.");
+              navigate("/auth?mode=signup");
+              return;
+            }
+            throw loginErr;
+          }
+        } else {
+          throw err;
+        }
+      }
 
       // Build FormData directly
       const formData = new FormData();
@@ -1216,7 +1455,7 @@ const FundiRegister = () => {
 
       if (result.success) {
         toast.success(result.message || 'Registration submitted successfully!');
-        setTimeout(() => navigate("/dashboard"), 2000);
+        setTimeout(() => navigate("/fundi/pending"), 800);
       } else {
         toast.error(result.message || 'Registration failed');
       }
@@ -1610,7 +1849,7 @@ const FundiRegister = () => {
 
               {/* Map is ALWAYS visible - user clicks to set location */}
               <div className="w-full h-96 rounded-lg border-2 border-border overflow-hidden relative mb-4">
-                <div id="fundi-map" className="w-full h-full" />
+                <div ref={fundiMapElRef} className="w-full h-full" />
                 {!leafletLoaded && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/40 z-20">
                     <div className="flex items-center gap-2 bg-black/60 text-white px-4 py-2 rounded">
@@ -1619,19 +1858,6 @@ const FundiRegister = () => {
                     </div>
                   </div>
                 )}
-                <MapInitializer
-                  lat={data.latitude || -1.2865}
-                  lng={data.longitude || 36.8172}
-                  label={data.locationDisplayName || ""}
-                  onMapClick={(lat, lng) => {
-                    setLocationFromCoords(lat, lng, 'map_click');
-                  }}
-                  onMarkerChange={(lat, lng) => {
-                    setData((prev) => ({ ...prev, latitude: lat, longitude: lng }));
-                    setUserAdjustedLocation(true);
-                    setCoordsFromDevice(false);
-                  }}
-                />
               </div>
 
                 <div className="flex gap-3 mb-4">
@@ -1708,7 +1934,7 @@ const FundiRegister = () => {
                 </Button>
                 <Button 
                   onClick={handleStep4Next} 
-                  disabled={!data.latitude}
+                  disabled={data.latitude == null || data.longitude == null}
                   className="flex-1"
                 >
                   Continue <ArrowRight className="w-4 h-4 ml-2" />
@@ -1816,9 +2042,26 @@ const ensureLeafletLoaded = async (): Promise<void> => {
   }
 };
 
-const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMarkerChange?: (lat: number, lng: number) => void; onMapClick?: (lat: number, lng: number) => void }> = ({ lat, lng, label, onMarkerChange, onMapClick }) => {
+const MapInitializer: React.FC<{
+  lat: number;
+  lng: number;
+  label?: string;
+  accuracyM?: number | null;
+  preferZoom?: number;
+  onMarkerChange?: (lat: number, lng: number) => void;
+  onMapClick?: (lat: number, lng: number) => void;
+}> = ({ lat, lng, label, accuracyM = null, preferZoom = 16, onMarkerChange, onMapClick }) => {
   const mapRef = useRef<any>(null);
   const markerRef = useRef<any>(null);
+  const accuracyCircleRef = useRef<any>(null);
+  const onMarkerChangeRef = useRef(onMarkerChange);
+  const onMapClickRef = useRef(onMapClick);
+
+  useEffect(() => {
+    onMarkerChangeRef.current = onMarkerChange;
+    onMapClickRef.current = onMapClick;
+  }, [onMarkerChange, onMapClick]);
+
   useEffect(() => {
     let canceled = false;
     const init = async () => {
@@ -1850,7 +2093,7 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
           tiles.on('load', () => {
             try {
               mapRef.current.invalidateSize();
-              mapRef.current.setView([lat, lng], 18);
+              mapRef.current.setView([lat, lng], preferZoom);
             } catch (e) {
               // ignore
             }
@@ -1865,7 +2108,7 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
           // when user drags marker, update parent state via callback
           markerRef.current.on('dragend', function (ev: any) {
             const pos = ev.target.getLatLng();
-            if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
+            if (onMarkerChangeRef.current) onMarkerChangeRef.current(pos.lat, pos.lng);
           });
 
           // allow clicking on map to set location (calls onMapClick for faster save)
@@ -1873,28 +2116,12 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
             const { lat: clickedLat, lng: clickedLng } = e.latlng;
             if (markerRef.current) markerRef.current.setLatLng([clickedLat, clickedLng]).openPopup();
             mapRef.current.setView([clickedLat, clickedLng]);
-            if (onMapClick) {
-              onMapClick(clickedLat, clickedLng);
-            } else if (onMarkerChange) {
-              onMarkerChange(clickedLat, clickedLng);
+            if (onMapClickRef.current) {
+              onMapClickRef.current(clickedLat, clickedLng);
+            } else if (onMarkerChangeRef.current) {
+              onMarkerChangeRef.current(clickedLat, clickedLng);
             }
           });
-        } else {
-          // update view quickly without fetching too many tiles immediately
-          try {
-            mapRef.current.setView([lat, lng], 13);
-            if (markerRef.current) {
-              markerRef.current.setLatLng([lat, lng]).setPopupContent(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
-            } else {
-              markerRef.current = L.marker([lat, lng], { draggable: true }).addTo(mapRef.current).bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`).openPopup();
-              markerRef.current.on('dragend', function (ev: any) {
-                const pos = ev.target.getLatLng();
-                if (onMarkerChange) onMarkerChange(pos.lat, pos.lng);
-              });
-            }
-          } catch (e) {
-            // ignore
-          }
         }
       } catch (e) {
         console.warn('Leaflet init error', e);
@@ -1908,12 +2135,79 @@ const MapInitializer: React.FC<{ lat: number; lng: number; label?: string; onMar
           mapRef.current.remove();
           mapRef.current = null;
           markerRef.current = null;
+          accuracyCircleRef.current = null;
         }
       } catch (e) {
         // ignore
       }
     };
-  }, [lat, lng, label, onMarkerChange, onMapClick]);
+  }, []);
+
+  // Update view/marker when coordinates change (does not recreate the map)
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = (window as any).L;
+    if (!map || !L) return;
+
+    try {
+      // flyTo feels more "GPS-like" than setView, but fallback safely
+      if (typeof map.flyTo === 'function') {
+        map.flyTo([lat, lng], preferZoom, { animate: true, duration: 0.6 });
+      } else {
+        map.setView([lat, lng], preferZoom);
+      }
+      if (markerRef.current) {
+        markerRef.current
+          .setLatLng([lat, lng])
+          .setPopupContent(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+      } else {
+        markerRef.current = L.marker([lat, lng], { draggable: true })
+          .addTo(map)
+          .bindPopup(label || `${lat.toFixed(6)}, ${lng.toFixed(6)}`);
+        markerRef.current.on('dragend', function (ev: any) {
+          const pos = ev.target.getLatLng();
+          if (onMarkerChangeRef.current) onMarkerChangeRef.current(pos.lat, pos.lng);
+        });
+      }
+
+      // Leaflet often needs invalidateSize after layout changes/scroll
+      setTimeout(() => {
+        try { map.invalidateSize(); } catch {}
+      }, 60);
+    } catch {
+      // ignore
+    }
+  }, [lat, lng, label, preferZoom]);
+
+  // Accuracy circle (helps user trust it's their live GPS)
+  useEffect(() => {
+    const map = mapRef.current;
+    const L = (window as any).L;
+    if (!map || !L) return;
+
+    try {
+      if (typeof accuracyM === 'number' && Number.isFinite(accuracyM) && accuracyM > 0) {
+        const radius = Math.min(Math.max(accuracyM, 5), 500);
+        if (!accuracyCircleRef.current) {
+          accuracyCircleRef.current = L.circle([lat, lng], {
+            radius,
+            color: '#3b82f6',
+            weight: 1,
+            fillColor: '#60a5fa',
+            fillOpacity: 0.15,
+          }).addTo(map);
+        } else {
+          accuracyCircleRef.current.setLatLng([lat, lng]);
+          accuracyCircleRef.current.setRadius(radius);
+        }
+      } else if (accuracyCircleRef.current) {
+        accuracyCircleRef.current.remove();
+        accuracyCircleRef.current = null;
+      }
+    } catch {
+      // ignore
+    }
+  }, [accuracyM, lat, lng]);
 
   return null;
 };

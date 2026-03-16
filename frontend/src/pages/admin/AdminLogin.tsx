@@ -21,16 +21,16 @@ export default function AdminLogin() {
   useEffect(() => {
     const checkSession = async () => {
       try {
-        const token = localStorage.getItem("token");
+        const token = localStorage.getItem("auth_token");
         if (token) {
           try {
-            const response = await apiClient.request("/auth/me", { includeAuth: true });
+            const response = await apiClient.getCurrentUser();
             if (response.user?.role === "admin") {
               navigate("/admin/dashboard");
               return;
             }
           } catch (err) {
-            localStorage.removeItem("token");
+            localStorage.removeItem("auth_token");
           }
         }
       } catch (err) {
@@ -59,9 +59,6 @@ export default function AdminLogin() {
       if (response.user.role !== "admin") {
         throw new Error("Access denied. This account is not authorized for admin access.");
       }
-
-      // Save token
-      localStorage.setItem("token", response.token);
 
       toast.success("Admin login successful!");
       navigate("/admin/dashboard");

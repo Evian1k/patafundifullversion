@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -31,6 +31,27 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+
+  // Server-truth admin guard (prevents stale JWTs after DB clean/reset)
+  useEffect(() => {
+    (async () => {
+      try {
+        const token = localStorage.getItem("auth_token");
+        if (!token) {
+          navigate("/admin/login");
+          return;
+        }
+        const me = await apiClient.getCurrentUser();
+        if (me?.user?.role !== "admin") {
+          localStorage.removeItem("auth_token");
+          navigate("/admin/login");
+        }
+      } catch (err) {
+        localStorage.removeItem("auth_token");
+        navigate("/admin/login");
+      }
+    })();
+  }, [navigate]);
 
   const menuItems = [
     {

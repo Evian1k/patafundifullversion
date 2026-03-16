@@ -6,13 +6,249 @@ import { upload, getFileUrl } from '../services/file.js';
 import { AppError } from '../utils/errors.js';
 import { getClient } from '../db.js';
 import { authMiddleware, requireRole } from '../middlewares/auth.js';
+import { generateOtpCode, hashOtp, safeEqual } from '../services/otp.js';
+import { sendMail, isSmtpConfigured, smtpMissingKeys } from '../services/mailer.js';
 
 const router = express.Router();
+
+const toRad = (deg) => (deg * Math.PI) / 180;
+const haversineKm = (lat1, lon1, lat2, lon2) => {
+  const R = 6371; // km
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+};
+
+function parseRadiiKm() {
+  const raw = process.env.JOB_SEARCH_RADII_KM || '3,6,10,15';
+  const radii = raw
+    .split(',')
+    .map((s) => parseFloat(String(s).trim()))
+    .filter((n) => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  return radii.length ? radii : [3, 6, 10, 15];
+}
+
+async function getCategoryPricing(category) {
+  const DEFAULT_BASE = parseFloat(process.env.DEFAULT_BASE_PRICE || '1000');
+  const DEFAULT_PER_KM = parseFloat(process.env.DEFAULT_PER_KM_RATE || '150');
+  if (!category) return { basePrice: DEFAULT_BASE, perKmRate: DEFAULT_PER_KM };
+  try {
+    // Frontend often sends category ids like "plumbing" while DB stores "Plumbing".
+    // Use case-insensitive matching so pricing config actually applies.
+    const r = await query('SELECT base_price, per_km_rate FROM service_categories WHERE lower(name) = lower($1) LIMIT 1', [category]);
+    const row = r.rows[0];
+    return {
+      basePrice: row?.base_price != null ? parseFloat(row.base_price) : DEFAULT_BASE,
+      perKmRate: row?.per_km_rate != null ? parseFloat(row.per_km_rate) : DEFAULT_PER_KM,
+    };
+  } catch {
+    return { basePrice: DEFAULT_BASE, perKmRate: DEFAULT_PER_KM };
+  }
+}
+
+function computeEstimatedPrice(distanceKm, basePrice, perKmRate) {
+  const includedKm = parseFloat(process.env.PRICE_INCLUDED_KM || '2');
+  const billable = Math.max(0, distanceKm - includedKm);
+  const distanceFee = parseFloat((billable * perKmRate).toFixed(2));
+  const total = parseFloat((basePrice + distanceFee).toFixed(2));
+  return { estimatedPrice: total, distanceFee };
+}
+
+async function dispatchJobRequests({ job, targets, timeoutSec }) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + timeoutSec * 1000);
+
+  for (const t of targets) {
+    try {
+      await query(
+        `INSERT INTO job_requests (job_id, fundi_id, status, expires_at) VALUES ($1, $2, $3, $4)`,
+        [job.id, t.user_id, 'sent', expiresAt],
+      );
+
+      emitToUser(t.user_id, 'job:request', {
+        jobId: job.id,
+        title: job.title,
+        description: job.description,
+        location: job.location,
+        latitude: job.latitude,
+        longitude: job.longitude,
+        distanceKm: t.distKm,
+        estimatedPrice: job.estimated_price,
+        expiresAt: expiresAt.toISOString(),
+      });
+
+      // expiration timer: when all are expired and still unassigned, expand search
+      setTimeout(async () => {
+        try {
+          await query(
+            `UPDATE job_requests SET status = 'expired'
+             WHERE job_id = $1 AND fundi_id = $2 AND status = 'sent'`,
+            [job.id, t.user_id],
+          );
+
+          const j = await query('SELECT id, customer_id, fundi_id FROM jobs WHERE id = $1', [job.id]);
+          if (j.rows.length === 0) return;
+          if (j.rows[0].fundi_id) return;
+
+          const remaining = await query(
+            `SELECT COUNT(*)::int as cnt FROM job_requests WHERE job_id = $1 AND status = 'sent' AND expires_at > NOW()`,
+            [job.id],
+          );
+          if ((remaining.rows[0]?.cnt || 0) === 0) {
+            // no active requests -> try expanding
+            await expandMatching(job.id);
+          }
+        } catch (e) {
+          console.error('job_request expiration/expand error', e?.message || e);
+        }
+      }, timeoutSec * 1000);
+    } catch (e) {
+      console.error('Failed to create job_request for', t.user_id, e.message);
+    }
+  }
+}
+
+async function expandMatching(jobId) {
+  const client = await getClient();
+  const radii = parseRadiiKm();
+  const BATCH = parseInt(process.env.JOB_REQUEST_BATCH_SIZE || '5');
+  const TIMEOUT_SEC = parseInt(process.env.JOB_REQUEST_TIMEOUT_SEC || '20');
+
+  try {
+    await client.query('BEGIN');
+    const jobRes = await client.query('SELECT * FROM jobs WHERE id = $1 FOR UPDATE', [jobId]);
+    if (jobRes.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
+    const job = jobRes.rows[0];
+    if (job.fundi_id) {
+      await client.query('ROLLBACK');
+      return;
+    }
+
+    // If there are still active requests, don't expand.
+    const activeReq = await client.query(
+      `SELECT COUNT(*)::int as cnt FROM job_requests WHERE job_id = $1 AND status = 'sent' AND expires_at > NOW()`,
+      [jobId],
+    );
+    if ((activeReq.rows[0]?.cnt || 0) > 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
+
+    const jobLat = job.latitude != null ? parseFloat(job.latitude) : null;
+    const jobLng = job.longitude != null ? parseFloat(job.longitude) : null;
+    if (jobLat == null || jobLng == null) {
+      await client.query('ROLLBACK');
+      return;
+    }
+
+    const tried = await client.query('SELECT DISTINCT fundi_id FROM job_requests WHERE job_id = $1', [jobId]);
+    const triedIds = new Set(tried.rows.map((r) => r.fundi_id));
+
+    const candidates = await client.query(
+      `SELECT fp.user_id, fp.first_name, fp.last_name, fp.skills, fl.latitude, fl.longitude
+       FROM fundi_profiles fp
+       JOIN fundi_locations fl ON fl.user_id = fp.user_id
+       WHERE fp.verification_status = 'approved' AND fl.online = true`,
+    );
+
+    const scored = [];
+    for (const r of candidates.rows) {
+      if (r.latitude == null || r.longitude == null) continue;
+      const distKm = haversineKm(jobLat, jobLng, parseFloat(r.latitude), parseFloat(r.longitude));
+      scored.push({ user_id: r.user_id, first_name: r.first_name, last_name: r.last_name, skills: r.skills, distKm });
+    }
+    scored.sort((a, b) => a.distKm - b.distKm);
+
+    const currentRadius = job.match_radius_km != null ? parseFloat(job.match_radius_km) : 0;
+    let chosenRadius = null;
+    let targets = [];
+    for (const rKm of radii) {
+      if (rKm <= currentRadius) continue;
+      const eligible = scored.filter((s) => s.distKm <= rKm && !triedIds.has(s.user_id));
+      if (eligible.length > 0) {
+        chosenRadius = rKm;
+        targets = eligible.slice(0, BATCH);
+        break;
+      }
+    }
+
+    if (!chosenRadius || targets.length === 0) {
+      // Exhausted all radii: mark back to pending and notify customer.
+      const prev = job.status;
+      await client.query(`UPDATE jobs SET status = 'pending', updated_at = CURRENT_TIMESTAMP WHERE id = $1`, [jobId]);
+      await client.query('COMMIT');
+      if (prev !== 'pending') await logJobStatusChange(query, jobId, prev, 'pending', { userId: null, role: 'system' });
+      emitToUser(job.customer_id, 'job:search:failed', { jobId });
+      return;
+    }
+
+    const { basePrice, perKmRate } = await getCategoryPricing(job.category);
+    const nearestDist = targets[0]?.distKm || chosenRadius;
+    const { estimatedPrice, distanceFee } = computeEstimatedPrice(nearestDist, basePrice, perKmRate);
+
+    const prev = job.status;
+    await client.query(
+      `UPDATE jobs
+       SET status = 'matching',
+           match_radius_km = $2,
+           match_attempt = COALESCE(match_attempt, 0) + 1,
+           estimated_price = $3,
+           base_price = $4,
+           distance_fee = $5,
+           distance_km = $6,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [jobId, chosenRadius, estimatedPrice, basePrice, distanceFee, nearestDist],
+    );
+
+    await client.query('COMMIT');
+
+    if (prev !== 'matching') await logJobStatusChange(query, jobId, prev, 'matching', { userId: null, role: 'system' });
+
+    // Re-read job for payloads
+    const refreshed = await query('SELECT * FROM jobs WHERE id = $1', [jobId]);
+    const j = refreshed.rows[0];
+
+    await dispatchJobRequests({ job: j, targets, timeoutSec: TIMEOUT_SEC });
+    emitToUser(j.customer_id, 'job:matching', {
+      jobId,
+      radiusKm: chosenRadius,
+      estimatedPrice: j.estimated_price,
+      candidates: targets.map((t) => ({ fundiId: t.user_id, distanceKm: t.distKm })),
+    });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('expandMatching error', e?.message || e);
+  } finally {
+    client.release();
+  }
+}
+
+async function logJobStatusChange(clientOrQuery, jobId, oldStatus, newStatus, actor) {
+  try {
+    const q = typeof clientOrQuery.query === 'function' ? clientOrQuery.query.bind(clientOrQuery) : clientOrQuery;
+    await q(
+      `INSERT INTO job_status_history (job_id, old_status, new_status, actor_id, actor_role, created_at)
+       VALUES ($1,$2,$3,$4,$5,NOW())`,
+      [jobId, oldStatus || null, newStatus, actor?.userId || null, actor?.role || null]
+    );
+  } catch {
+    // don't break main flow on audit failures
+  }
+}
 
 /**
  * Create job
  */
-router.post('/', authMiddleware, async (req, res, next) => {
+async function handleCreateJob(req, res, next) {
   try {
     const {
       title, description, category,
@@ -24,6 +260,32 @@ router.post('/', authMiddleware, async (req, res, next) => {
       throw new AppError('Title, description, and location are required', 400);
     }
 
+    // GPS is required for matching/tracking. Without coordinates, users see a "location mismatch"
+    // (pin defaults), and matching cannot work correctly.
+    if (typeof latitude === 'undefined' || typeof longitude === 'undefined' || latitude === null || longitude === null) {
+      throw new AppError('GPS coordinates are required. Please capture/select your location on the map.', 400);
+    }
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      throw new AppError('Invalid GPS coordinates', 400);
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new AppError('GPS coordinates out of range', 400);
+    }
+
+    // Safety setting: if the customer has hidden their profile, don't allow matching.
+    // This makes "Hide your profile" actually enforceable server-side.
+    try {
+      const s = await query('SELECT hide_profile FROM user_settings WHERE user_id = $1', [req.user.userId]);
+      if (s.rows[0]?.hide_profile === true) {
+        throw new AppError('Your profile is hidden. Turn off "Hide your profile" in Settings to request a job.', 403);
+      }
+    } catch (e) {
+      // If settings table doesn't exist (fresh DB without migrations), don't block job creation.
+      if (e instanceof AppError) throw e;
+    }
+
     const jobId = uuidv4();
     const result = await query(
       `INSERT INTO jobs (
@@ -33,8 +295,8 @@ router.post('/', authMiddleware, async (req, res, next) => {
       RETURNING *`,
       [
         jobId, req.user.userId, title, description, category,
-        location, latitude ? parseFloat(latitude) : null,
-        longitude ? parseFloat(longitude) : null,
+        location, lat,
+        lng,
         estimatedPrice ? parseFloat(estimatedPrice) : null
       ]
     );
@@ -63,96 +325,75 @@ router.post('/', authMiddleware, async (req, res, next) => {
           `
         );
 
-        // compute distances (Haversine) and pick nearest
-        const toRad = (deg) => deg * Math.PI / 180;
-        const haversine = (lat1, lon1, lat2, lon2) => {
-          const R = 6371; // km
-          const dLat = toRad(lat2 - lat1);
-          const dLon = toRad(lon2 - lon1);
-          const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-                    Math.sin(dLon/2) * Math.sin(dLon/2);
-          const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-          return R * c;
-        };
-
         const jobLat = job.latitude ? parseFloat(job.latitude) : null;
         const jobLng = job.longitude ? parseFloat(job.longitude) : null;
 
-        // Broadcast to nearest fundis in batches
+        const radii = parseRadiiKm();
+        const { basePrice, perKmRate } = await getCategoryPricing(job.category);
+
+        // Broadcast to fundis within a radius (expand automatically if needed)
         if (jobLat !== null && jobLng !== null && candidates.rows.length > 0) {
           const scored = [];
           for (const r of candidates.rows) {
             if (r.latitude == null || r.longitude == null) continue;
-            const distKm = haversine(jobLat, jobLng, parseFloat(r.latitude), parseFloat(r.longitude));
+            const distKm = haversineKm(jobLat, jobLng, parseFloat(r.latitude), parseFloat(r.longitude));
             scored.push({ user_id: r.user_id, first_name: r.first_name, last_name: r.last_name, skills: r.skills, distKm });
           }
 
           scored.sort((a,b) => a.distKm - b.distKm);
           const BATCH = parseInt(process.env.JOB_REQUEST_BATCH_SIZE || '5');
           const TIMEOUT_SEC = parseInt(process.env.JOB_REQUEST_TIMEOUT_SEC || '20');
-          const targets = scored.slice(0, BATCH);
+          let chosenRadius = null;
+          let targets = [];
+          for (const rKm of radii) {
+            const eligible = scored.filter((s) => s.distKm <= rKm);
+            if (eligible.length > 0) {
+              chosenRadius = rKm;
+              targets = eligible.slice(0, BATCH);
+              break;
+            }
+          }
 
           if (targets.length > 0) {
+            const nearestDist = targets[0]?.distKm || (chosenRadius || 0);
+            const { estimatedPrice: autoPrice, distanceFee } = computeEstimatedPrice(nearestDist, basePrice, perKmRate);
+
             // create job_request records and set job to matching
-            await query('UPDATE jobs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', ['matching', job.id]);
-
-            const now = new Date();
-            const expiresAt = new Date(now.getTime() + TIMEOUT_SEC * 1000);
-
-            for (const t of targets) {
-              try {
-                await query(
-                  `INSERT INTO job_requests (job_id, fundi_id, status, expires_at) VALUES ($1, $2, $3, $4)`,
-                  [job.id, t.user_id, 'sent', expiresAt]
-                );
-
-                // emit to each candidate with countdown
-                emitToUser(t.user_id, 'job:request', {
-                  jobId: job.id,
-                  title: job.title,
-                  description: job.description,
-                  location: job.location,
-                  latitude: job.latitude,
-                  longitude: job.longitude,
-                  distanceKm: t.distKm,
-                  expiresAt: expiresAt.toISOString()
-                });
-
-                // schedule expiration
-                setTimeout(async () => {
-                  try {
-                    // expire this request if still pending
-                    await query(`UPDATE job_requests SET status = 'expired' WHERE job_id = $1 AND fundi_id = $2 AND status = 'sent'`, [job.id, t.user_id]);
-                    // check if job has been accepted
-                    const j = await query('SELECT fundi_id FROM jobs WHERE id = $1', [job.id]);
-                    if (j.rows.length > 0 && !j.rows[0].fundi_id) {
-                      // no-one accepted yet; if all requests expired, set job back to pending
-                      const pendingRes = await query('SELECT COUNT(*) as cnt FROM job_requests WHERE job_id = $1 AND status IN ($2,$3)', [job.id, 'sent', 'pending']);
-                      const remaining = parseInt(pendingRes.rows[0].cnt || 0);
-                      if (remaining === 0) {
-                        await query('UPDATE jobs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2', ['pending', job.id]);
-                        // notify customer no fundis available
-                        emitToUser(job.customer_id, 'job:search:failed', { jobId: job.id });
-                      }
-                    }
-                  } catch (e) {
-                    console.error('job_request expiration error', e);
-                  }
-                }, TIMEOUT_SEC * 1000);
-
-              } catch (e) {
-                console.error('Failed to create job_request for', t.user_id, e.message);
-              }
-            }
+            await query(
+              `UPDATE jobs
+               SET status = $1,
+                   match_radius_km = $2,
+                   match_attempt = COALESCE(match_attempt, 0) + 1,
+                   estimated_price = COALESCE(estimated_price, $3),
+                   base_price = $4,
+                   distance_fee = $5,
+                   distance_km = $6,
+                   updated_at = CURRENT_TIMESTAMP
+               WHERE id = $7`,
+              ['matching', chosenRadius, autoPrice, basePrice, distanceFee, nearestDist, job.id],
+            );
+            await logJobStatusChange(query, job.id, job.status, 'matching', req.user);
+            const refreshedForDispatch = await query('SELECT * FROM jobs WHERE id = $1', [job.id]);
+            await dispatchJobRequests({ job: refreshedForDispatch.rows[0], targets, timeoutSec: TIMEOUT_SEC });
 
             // notify customer that matching started
             try {
-              emitToUser(job.customer_id, 'job:matching', { jobId: job.id, candidates: targets.map(t => ({ fundiId: t.user_id, distanceKm: t.distKm })) });
+              const refreshed2 = await query('SELECT estimated_price FROM jobs WHERE id = $1', [job.id]);
+              emitToUser(job.customer_id, 'job:matching', {
+                jobId: job.id,
+                radiusKm: chosenRadius,
+                estimatedPrice: refreshed2.rows[0]?.estimated_price || null,
+                candidates: targets.map(t => ({ fundiId: t.user_id, distanceKm: t.distKm })),
+              });
             } catch (e) {
               console.error('Failed to emit job:matching to customer', e);
             }
+          } else {
+            emitToUser(job.customer_id, 'job:search:failed', { jobId: job.id });
           }
+        } else {
+          // No eligible fundis online/approved (or missing GPS) -> notify customer so UI doesn't hang.
+          emitToUser(job.customer_id, 'job:search:failed', { jobId: job.id });
         }
       } catch (err) {
         console.error('Matching error:', err);
@@ -181,7 +422,10 @@ router.post('/', authMiddleware, async (req, res, next) => {
   } catch (error) {
     next(error);
   }
-});
+}
+
+router.post('/', authMiddleware, handleCreateJob);
+router.post('/create', authMiddleware, handleCreateJob);
 
 /**
  * Get user's jobs
@@ -215,6 +459,80 @@ router.get('/', authMiddleware, async (req, res, next) => {
         createdAt: job.created_at,
         updatedAt: job.updated_at
       }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get available job requests (fundi only)
+ */
+router.get('/available', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+  try {
+    const userId = req.user.userId;
+    const result = await query(
+      `SELECT jr.job_id, jr.expires_at, jr.created_at,
+              j.title, j.description, j.category, j.location, j.latitude, j.longitude, j.estimated_price, j.status
+       FROM job_requests jr
+       JOIN jobs j ON j.id = jr.job_id
+       WHERE jr.fundi_id = $1
+         AND jr.status = 'sent'
+         AND jr.expires_at > NOW()
+       ORDER BY jr.created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+
+    res.json({ success: true, requests: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get currently active job for fundi (accepted/on_the_way/arrived/in_progress)
+ */
+router.get('/fundi/active', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+  try {
+    const userId = req.user.userId;
+    const r = await query(
+      `SELECT j.*, cu.full_name as customer_name, cu.phone as customer_phone, cu.email as customer_email
+       FROM jobs j
+       JOIN users cu ON cu.id = j.customer_id
+       WHERE j.fundi_id = $1
+         AND j.status IN ('accepted','on_the_way','arrived','in_progress')
+       ORDER BY j.updated_at DESC
+       LIMIT 1`,
+      [userId]
+    );
+
+    if (r.rows.length === 0) {
+      return res.json({ success: true, job: null });
+    }
+
+    const j = r.rows[0];
+    res.json({
+      success: true,
+      job: {
+        id: j.id,
+        title: j.title,
+        description: j.description,
+        category: j.category,
+        location: j.location,
+        latitude: j.latitude,
+        longitude: j.longitude,
+        status: j.status,
+        estimatedPrice: j.estimated_price,
+        customer: {
+          id: j.customer_id,
+          name: j.customer_name,
+          phone: j.customer_phone,
+          email: j.customer_email,
+        },
+        updatedAt: j.updated_at,
+        createdAt: j.created_at,
+      },
     });
   } catch (error) {
     next(error);
@@ -264,13 +582,93 @@ router.get('/:jobId', authMiddleware, async (req, res, next) => {
 });
 
 /**
+ * Get job status + history
+ */
+router.get('/:jobId/status', authMiddleware, async (req, res, next) => {
+  try {
+    const jobRes = await query(
+      `SELECT * FROM jobs WHERE id = $1 AND (customer_id = $2 OR fundi_id = $2)`,
+      [req.params.jobId, req.user.userId]
+    );
+    if (jobRes.rows.length === 0) throw new AppError('Job not found', 404);
+    const job = jobRes.rows[0];
+
+    const history = await query(
+      `SELECT old_status, new_status, actor_id, actor_role, created_at
+       FROM job_status_history
+       WHERE job_id = $1
+       ORDER BY created_at ASC`,
+      [req.params.jobId]
+    );
+
+    res.json({
+      success: true,
+      status: job.status,
+      jobId: job.id,
+      updatedAt: job.updated_at,
+      history: history.rows,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Get live job location (customer/admin view)
+ * Returns customer job pin + latest fundi location if assigned.
+ */
+router.get('/:jobId/location', authMiddleware, async (req, res, next) => {
+  try {
+    const jobRes = await query(
+      `SELECT id, customer_id, fundi_id, latitude, longitude, status
+       FROM jobs
+       WHERE id = $1 AND (customer_id = $2 OR fundi_id = $2)`,
+      [req.params.jobId, req.user.userId]
+    );
+    if (jobRes.rows.length === 0) throw new AppError('Job not found', 404);
+    const job = jobRes.rows[0];
+
+    let fundiLocation = null;
+    if (job.fundi_id) {
+      const locRes = await query(
+        `SELECT latitude, longitude, accuracy, updated_at
+         FROM fundi_locations
+         WHERE user_id = $1`,
+        [job.fundi_id]
+      );
+      if (locRes.rows.length > 0) {
+        fundiLocation = {
+          latitude: locRes.rows[0].latitude,
+          longitude: locRes.rows[0].longitude,
+          accuracy: locRes.rows[0].accuracy,
+          updatedAt: locRes.rows[0].updated_at,
+        };
+      }
+    }
+
+    res.json({
+      success: true,
+      job: {
+        id: job.id,
+        status: job.status,
+        customerPin: { latitude: job.latitude, longitude: job.longitude },
+        fundiId: job.fundi_id,
+        fundiLocation,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * Update job status
  */
 router.patch('/:jobId/status', authMiddleware, async (req, res, next) => {
   try {
     const { status } = req.body;
 
-    const validStatuses = ['pending', 'matching', 'accepted', 'in_progress', 'completed', 'cancelled'];
+    const validStatuses = ['pending', 'matching', 'accepted', 'on_the_way', 'arrived', 'in_progress', 'completed', 'cancelled'];
     if (!validStatuses.includes(status)) {
       throw new AppError('Invalid status', 400);
     }
@@ -293,6 +691,12 @@ router.patch('/:jobId/status', authMiddleware, async (req, res, next) => {
       throw new AppError('Only assigned fundi may update this status', 403);
     }
 
+    if (status === 'cancelled' && allowedByCustomer) {
+      if (!['pending', 'matching'].includes(job.status)) {
+        throw new AppError('Job can only be cancelled before acceptance', 400);
+      }
+    }
+
     // Prevent job actions for unapproved fundis
     if (allowedByFundi) {
       const fp = await query('SELECT verification_status FROM fundi_profiles WHERE user_id = $1', [req.user.userId]);
@@ -301,71 +705,113 @@ router.patch('/:jobId/status', authMiddleware, async (req, res, next) => {
       }
     }
 
-    // Begin transaction for completion workflow
-    if (status === 'completed' && job.status !== 'completed') {
-      const client = await getClient();
-      try {
-        await client.query('BEGIN');
+    const client = await getClient();
+    try {
+      await client.query('BEGIN');
 
-        // Determine final price (allow override by customer or fundi via body.finalPrice)
-        const finalPrice = req.body.finalPrice ? parseFloat(req.body.finalPrice) : (job.estimated_price ? parseFloat(job.estimated_price) : 0);
-        const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENT || '15');
-        const platformFee = parseFloat((finalPrice * (PLATFORM_FEE_PERCENT / 100)).toFixed(2));
-        const fundiEarnings = parseFloat((finalPrice - platformFee).toFixed(2));
+      const finalPrice =
+        status === 'completed'
+          ? req.body.finalPrice
+            ? parseFloat(req.body.finalPrice)
+            : job.estimated_price
+              ? parseFloat(job.estimated_price)
+              : 0
+          : job.final_price
+            ? parseFloat(job.final_price)
+            : null;
 
-        // Update job pricing and status
-        const upd = await client.query(
-          `UPDATE jobs SET status = $1, final_price = $2, platform_fee = $3, updated_at = CURRENT_TIMESTAMP WHERE id = $4 RETURNING *`,
-          [status, finalPrice, platformFee, job.id]
-        );
+      const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENT || '15');
+      const platformFee =
+        status === 'completed' && finalPrice != null
+          ? parseFloat((finalPrice * (PLATFORM_FEE_PERCENT / 100)).toFixed(2))
+          : job.platform_fee
+            ? parseFloat(job.platform_fee)
+            : null;
 
-        // Insert payment record (assume platform marks as completed for bookkeeping)
-        await client.query(
-          `INSERT INTO payments (job_id, customer_id, fundi_id, amount, platform_fee, fundi_earnings, payment_status, payment_method, created_at)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`,
-          [job.id, job.customer_id, job.fundi_id, finalPrice, platformFee, fundiEarnings, 'completed', 'wallet']
-        );
-
-        // Credit fundi wallet
-        await client.query(
-          `INSERT INTO fundi_wallets (user_id, balance, updated_at)
-           VALUES ($1, $2, NOW())
-           ON CONFLICT (user_id) DO UPDATE SET balance = fundi_wallets.balance + EXCLUDED.balance, updated_at = NOW()`,
-          [job.fundi_id, fundiEarnings]
-        );
-
-        // Record wallet transaction
-        await client.query(
-          `INSERT INTO fundi_wallet_transactions (user_id, amount, type, source, job_id, description, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
-          [job.fundi_id, fundiEarnings, 'credit', 'job', job.id, `Earnings for job ${job.id}`]
-        );
-
-        await client.query('COMMIT');
-
-        // Return updated job
-        const refreshed = await query('SELECT * FROM jobs WHERE id = $1', [job.id]);
-        const updatedJob = refreshed.rows[0];
-
-        res.json({ success: true, job: { id: updatedJob.id, status: updatedJob.status, finalPrice: updatedJob.final_price, platformFee: updatedJob.platform_fee, updatedAt: updatedJob.updated_at } });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
-    } else {
-      // Simple status update
-      const result = await query(
-        `UPDATE jobs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
-        [status, req.params.jobId]
+      const result = await client.query(
+        `UPDATE jobs
+         SET status = $1,
+             final_price = COALESCE($2, final_price),
+             platform_fee = COALESCE($3, platform_fee),
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $4
+         RETURNING *`,
+        [status, finalPrice, platformFee, req.params.jobId]
       );
 
       if (result.rows.length === 0) throw new AppError('Job not found', 404);
-
       const j = result.rows[0];
-      res.json({ success: true, job: { id: j.id, status: j.status, updatedAt: j.updated_at } });
+      if (job.status !== j.status) {
+        await logJobStatusChange(client, j.id, job.status, j.status, req.user);
+      }
+
+      // On completion, ensure a pending payment record exists (wallet credit only happens after confirmed payment)
+      if (status === 'completed' && job.status !== 'completed') {
+        const amount = finalPrice || 0;
+        const pf = platformFee || 0;
+        const earnings = parseFloat((amount - pf).toFixed(2));
+        const existingPay = await client.query('SELECT id FROM payments WHERE job_id = $1', [j.id]);
+        if (existingPay.rows.length === 0) {
+          await client.query(
+            `INSERT INTO payments (job_id, customer_id, fundi_id, amount, platform_fee, fundi_earnings, payment_status, payment_method, created_at)
+             VALUES ($1,$2,$3,$4,$5,$6,'pending',NULL,NOW())`,
+            [j.id, j.customer_id, j.fundi_id, amount, pf, earnings]
+          );
+        }
+      }
+
+      await client.query('COMMIT');
+
+      res.json({ success: true, job: { id: j.id, status: j.status, finalPrice: j.final_price, platformFee: j.platform_fee, updatedAt: j.updated_at } });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      throw err;
+    } finally {
+      client.release();
     }
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Cancel job (customer only, before acceptance)
+ */
+router.post('/:jobId/cancel', authMiddleware, async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+    const userId = req.user.userId;
+    const { reason } = req.body || {};
+
+    const jobRes = await query('SELECT * FROM jobs WHERE id = $1', [jobId]);
+    if (jobRes.rows.length === 0) throw new AppError('Job not found', 404);
+    const job = jobRes.rows[0];
+    if (job.customer_id !== userId) throw new AppError('Only the customer can cancel this job', 403);
+    if (!['pending', 'matching'].includes(job.status)) {
+      throw new AppError('Job can only be cancelled before acceptance', 400);
+    }
+
+    const update = await query(
+      `UPDATE jobs SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP WHERE id = $1 RETURNING *`,
+      [jobId]
+    );
+    const cancelledJob = update.rows[0];
+    await logJobStatusChange(query, jobId, job.status, 'cancelled', req.user);
+
+    // Expire any open requests
+    await query(`UPDATE job_requests SET status = 'expired' WHERE job_id = $1 AND status = 'sent'`, [jobId]).catch(() => {});
+
+    // Notify fundis who had the request
+    try {
+      const reqs = await query(`SELECT fundi_id FROM job_requests WHERE job_id = $1`, [jobId]);
+      for (const r of reqs.rows) {
+        emitToUser(r.fundi_id, 'job:cancelled', { jobId, reason: reason || null });
+      }
+    } catch {
+      // ignore
+    }
+
+    res.json({ success: true, message: 'Job cancelled', job: { id: cancelledJob.id, status: cancelledJob.status } });
   } catch (error) {
     next(error);
   }
@@ -449,7 +895,6 @@ router.get('/:jobId/photos', authMiddleware, async (req, res, next) => {
 router.post('/:jobId/accept', authMiddleware, async (req, res, next) => {
   try {
     const { jobId } = req.params;
-    const { estimatedPrice } = req.body;
     const userId = req.user.userId;
 
     // Verify job exists and is still pending/matching
@@ -478,11 +923,17 @@ router.post('/:jobId/accept', authMiddleware, async (req, res, next) => {
       throw new AppError('Fundi subscription expired or inactive', 403);
     }
 
-    // Mark job as accepted to this fundi
+    // First-accept-wins lock (atomic)
     const updateRes = await query(
-      `UPDATE jobs SET fundi_id = $1, status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
+      `UPDATE jobs
+       SET fundi_id = $1, status = 'accepted', updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2 AND fundi_id IS NULL AND status IN ('pending','matching')
+       RETURNING *`,
       [userId, jobId]
     );
+    if (updateRes.rows.length === 0) {
+      throw new AppError('Job already accepted by another fundi', 409);
+    }
 
     // Mark all job_requests for this job as handled
     await query(
@@ -491,12 +942,44 @@ router.post('/:jobId/accept', authMiddleware, async (req, res, next) => {
     );
 
     const acceptedJob = updateRes.rows[0];
+    await logJobStatusChange(query, acceptedJob.id, job.status, 'accepted', req.user);
+
+    // Distance-based pricing: compute estimate using fundi distance (auto, not mock)
+    let distanceKm = null;
+    let estimatedPriceAuto = acceptedJob.estimated_price != null ? parseFloat(acceptedJob.estimated_price) : null;
+    try {
+      const jobLat = acceptedJob.latitude != null ? parseFloat(acceptedJob.latitude) : null;
+      const jobLng = acceptedJob.longitude != null ? parseFloat(acceptedJob.longitude) : null;
+      if (jobLat != null && jobLng != null) {
+        const loc = await query('SELECT latitude, longitude FROM fundi_locations WHERE user_id = $1', [userId]);
+        if (loc.rows.length > 0 && loc.rows[0].latitude != null && loc.rows[0].longitude != null) {
+          distanceKm = haversineKm(jobLat, jobLng, parseFloat(loc.rows[0].latitude), parseFloat(loc.rows[0].longitude));
+          const { basePrice, perKmRate } = await getCategoryPricing(acceptedJob.category);
+          const { estimatedPrice, distanceFee } = computeEstimatedPrice(distanceKm, basePrice, perKmRate);
+          estimatedPriceAuto = estimatedPrice;
+          await query(
+            `UPDATE jobs
+             SET estimated_price = COALESCE(estimated_price, $2),
+                 base_price = $3,
+                 distance_fee = $4,
+                 distance_km = $5,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
+            [jobId, estimatedPrice, basePrice, distanceFee, distanceKm],
+          );
+        }
+      }
+    } catch {
+      // ignore pricing failures (won't block acceptance)
+    }
 
     // Notify customer via realtime
     try {
       emitToUser(acceptedJob.customer_id, 'job:accepted', {
         jobId: acceptedJob.id,
         fundiId: userId,
+        distanceKm,
+        estimatedPrice: estimatedPriceAuto,
         message: `${fundi.first_name} ${fundi.last_name} accepted your job`
       });
     } catch (err) {
@@ -515,7 +998,8 @@ router.post('/:jobId/accept', authMiddleware, async (req, res, next) => {
         longitude: acceptedJob.longitude,
         status: acceptedJob.status,
         fundiId: acceptedJob.fundi_id,
-        estimatedPrice: acceptedJob.estimated_price,
+        estimatedPrice: estimatedPriceAuto,
+        distanceKm,
         createdAt: acceptedJob.created_at
       }
     });
@@ -542,8 +1026,16 @@ router.post('/:jobId/check-in', authMiddleware, async (req, res, next) => {
     if (job.fundi_id !== userId) {
       throw new AppError('This job is not assigned to you', 403);
     }
-    if (job.status !== 'accepted') {
-      throw new AppError(`Cannot check in to job with status: ${job.status}`, 400);
+    // Allow step-by-step transitions:
+    // accepted -> on_the_way -> arrived -> in_progress
+    const allowedTransitions = {
+      accepted: ['on_the_way'],
+      on_the_way: ['arrived'],
+      arrived: ['in_progress'],
+    };
+    const allowedNext = allowedTransitions[job.status] || [];
+    if (!allowedNext.includes(status)) {
+      throw new AppError(`Cannot update job from ${job.status} to ${status}`, 400);
     }
 
     // Valid statuses
@@ -551,11 +1043,33 @@ router.post('/:jobId/check-in', authMiddleware, async (req, res, next) => {
       throw new AppError('Invalid status for check-in', 400);
     }
 
+    // If arriving, verify proximity to customer (anti-cheat / correctness)
+    if (status === 'arrived') {
+      const lat = latitude != null ? parseFloat(latitude) : null;
+      const lng = longitude != null ? parseFloat(longitude) : null;
+      if (lat == null || lng == null || Number.isNaN(lat) || Number.isNaN(lng)) {
+        throw new AppError('Valid GPS coordinates are required to confirm arrival', 400);
+      }
+      if (job.latitude != null && job.longitude != null) {
+        const jobLat = parseFloat(job.latitude);
+        const jobLng = parseFloat(job.longitude);
+        const distKm = haversineKm(jobLat, jobLng, lat, lng);
+        const maxMeters = process.env.ARRIVAL_MAX_DISTANCE_METERS
+          ? parseInt(process.env.ARRIVAL_MAX_DISTANCE_METERS, 10)
+          : 150;
+        const distMeters = Math.round(distKm * 1000);
+        if (distMeters > maxMeters) {
+          throw new AppError(`You are too far from the customer location (${distMeters}m > ${maxMeters}m)`, 400);
+        }
+      }
+    }
+
     // Update job status
     const updateRes = await query(
       `UPDATE jobs SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING *`,
       [status, jobId]
     );
+    await logJobStatusChange(query, jobId, job.status, status, req.user);
 
     // Update fundi location
     if (latitude && longitude) {
@@ -577,6 +1091,9 @@ router.post('/:jobId/check-in', authMiddleware, async (req, res, next) => {
         latitude,
         longitude
       });
+      // Generic status event for UIs
+      emitToUser(updatedJob.customer_id, 'job:status', { jobId, status });
+      emitToUser(userId, 'job:status', { jobId, status });
     } catch (err) {
       console.error('Error notifying customer of check-in:', err.message);
     }
@@ -637,8 +1154,9 @@ router.post('/:jobId/complete', authMiddleware, upload.array('photos', 5), async
     }
 
     const finalPriceNum = parseFloat(finalPrice);
-    const platformFee = finalPriceNum * 0.15; // 15% platform commission
-    const fundiEarnings = finalPriceNum - platformFee;
+    const PLATFORM_FEE_PERCENT = parseFloat(process.env.PLATFORM_FEE_PERCENT || '15');
+    const platformFee = parseFloat((finalPriceNum * (PLATFORM_FEE_PERCENT / 100)).toFixed(2));
+    const fundiEarnings = parseFloat((finalPriceNum - platformFee).toFixed(2));
 
     // Update job to completed
     const updateRes = await query(
@@ -648,41 +1166,74 @@ router.post('/:jobId/complete', authMiddleware, upload.array('photos', 5), async
     );
 
     const completedJob = updateRes.rows[0];
+    await logJobStatusChange(query, jobId, job.status, 'completed', req.user);
 
-    // Create payment record
-    const paymentRes = await query(
-      `INSERT INTO payments (id, job_id, customer_id, fundi_id, amount, platform_fee, fundi_earnings, payment_method, payment_status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
-      [
-        uuidv4(), jobId, completedJob.customer_id, userId,
-        finalPriceNum, platformFee, fundiEarnings,
-        'pending', 'pending'
-      ]
-    );
+    // Create or update payment record (one per job)
+    let payment;
+    const existingPay = await query('SELECT * FROM payments WHERE job_id = $1 ORDER BY created_at DESC LIMIT 1', [jobId]);
+    if (existingPay.rows.length > 0) {
+      const p = existingPay.rows[0];
+      const upd = await query(
+        `UPDATE payments
+         SET amount = $1, platform_fee = $2, fundi_earnings = $3
+         WHERE id = $4
+         RETURNING *`,
+        [finalPriceNum, platformFee, fundiEarnings, p.id]
+      );
+      payment = upd.rows[0];
+    } else {
+      const paymentRes = await query(
+        `INSERT INTO payments (id, job_id, customer_id, fundi_id, amount, platform_fee, fundi_earnings, payment_method, payment_status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`,
+        [
+          uuidv4(), jobId, completedJob.customer_id, userId,
+          finalPriceNum, platformFee, fundiEarnings,
+          null, 'pending'
+        ]
+      );
+      payment = paymentRes.rows[0];
+    }
 
-    const payment = paymentRes.rows[0];
-
-    // Add to fundi wallet
+    // Mark job as needing customer OTP confirmation before payment
     await query(
-      `INSERT INTO fundi_wallets (user_id, balance) VALUES ($1, $2)
-       ON CONFLICT (user_id) DO UPDATE SET balance = fundi_wallets.balance + $2`,
-      [userId, fundiEarnings]
-    );
+      `UPDATE jobs SET customer_completion_confirmed = false, customer_completion_confirmed_at = NULL WHERE id = $1`,
+      [jobId]
+    ).catch(() => {});
 
-    // Log transaction
-    await query(
-      `INSERT INTO fundi_wallet_transactions (user_id, amount, type, source, job_id, description)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [userId, fundiEarnings, 'earning', 'job_completion', jobId, `Job completed: ${completedJob.title}`]
-    );
+    // Send completion OTP to customer (email)
+    try {
+      const custRes = await query('SELECT email FROM users WHERE id = $1', [completedJob.customer_id]);
+      const customerEmail = custRes.rows[0]?.email;
+      if (customerEmail) {
+        if (!isSmtpConfigured()) {
+          throw new Error(`SMTP not configured (missing: ${smtpMissingKeys().join(', ')})`);
+        }
+        const code = generateOtpCode();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+        const codeHash = hashOtp(code, customerEmail, `job_complete:${jobId}`);
+        await query(
+          `INSERT INTO otp_codes (user_id, destination, channel, purpose, code_hash, expires_at)
+           VALUES ($1, $2, 'email', $3, $4, $5)`,
+          [completedJob.customer_id, customerEmail, `job_complete:${jobId}`, codeHash, expiresAt]
+        );
+
+        const subject = 'FixIt Connect: Confirm Job Completion';
+        const text = `Your job completion OTP is ${code}. It expires in 10 minutes. Job ID: ${jobId}`;
+        const html = `<p>Your job completion OTP is <strong>${code}</strong>. It expires in 10 minutes.</p><p>Job ID: <code>${jobId}</code></p>`;
+        await sendMail(customerEmail, subject, text, html);
+      }
+    } catch (e) {
+      console.error('Failed to send job completion OTP:', e.message);
+    }
 
     // Notify customer
     try {
       emitToUser(completedJob.customer_id, 'job:completed', {
         jobId,
-        message: 'Job completed! Ready for payment confirmation',
+        message: 'Job completed! Enter the OTP sent to your email to confirm, then pay.',
         finalPrice: finalPriceNum,
-        photos: photoUrls
+        photos: photoUrls,
+        requiresOtp: true,
       });
     } catch (err) {
       console.error('Error notifying customer of completion:', err.message);
@@ -706,6 +1257,67 @@ router.post('/:jobId/complete', authMiddleware, upload.array('photos', 5), async
       },
       photos: photoUrls
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Customer confirms job completion with OTP (required before payment)
+ */
+router.post('/:jobId/confirm-completion', authMiddleware, async (req, res, next) => {
+  try {
+    const { jobId } = req.params;
+    const { code } = req.body || {};
+    if (!code) throw new AppError('OTP code is required', 400);
+
+    const jobRes = await query('SELECT * FROM jobs WHERE id = $1', [jobId]);
+    if (jobRes.rows.length === 0) throw new AppError('Job not found', 404);
+    const job = jobRes.rows[0];
+    if (job.customer_id !== req.user.userId) throw new AppError('Only the customer can confirm completion', 403);
+    if (job.status !== 'completed') throw new AppError('Job must be completed first', 400);
+    if (job.customer_completion_confirmed) {
+      return res.json({ success: true, message: 'Already confirmed' });
+    }
+
+    const userRes = await query('SELECT email FROM users WHERE id = $1', [req.user.userId]);
+    const email = userRes.rows[0]?.email;
+    if (!email) throw new AppError('No email on account', 400);
+
+    const otpRes = await query(
+      `SELECT * FROM otp_codes
+       WHERE user_id = $1 AND purpose = $2 AND used = false
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [req.user.userId, `job_complete:${jobId}`]
+    );
+    if (otpRes.rows.length === 0) throw new AppError('OTP not found', 400);
+    const otp = otpRes.rows[0];
+    if (new Date(otp.expires_at) < new Date()) throw new AppError('OTP expired', 400);
+    if ((otp.attempts || 0) >= 5) throw new AppError('Too many attempts', 429);
+
+    const expected = hashOtp(String(code), otp.destination, otp.purpose);
+    await query('UPDATE otp_codes SET attempts = attempts + 1 WHERE id = $1', [otp.id]).catch(() => {});
+    if (!safeEqual(expected, otp.code_hash)) throw new AppError('Invalid OTP', 400);
+
+    await query('UPDATE otp_codes SET used = true WHERE id = $1', [otp.id]);
+    await query(
+      `UPDATE jobs
+       SET customer_completion_confirmed = true,
+           customer_completion_confirmed_at = CURRENT_TIMESTAMP,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $1`,
+      [jobId]
+    );
+
+    // Notify fundi
+    try {
+      if (job.fundi_id) emitToUser(job.fundi_id, 'job:completion:confirmed', { jobId });
+    } catch {
+      // ignore
+    }
+
+    res.json({ success: true, message: 'Completion confirmed' });
   } catch (error) {
     next(error);
   }

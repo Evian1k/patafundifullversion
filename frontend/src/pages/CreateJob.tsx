@@ -167,7 +167,7 @@ const CreateJob = () => {
   const reverseGeocode = async (latitude: number, longitude: number): Promise<string> => {
     try {
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1`
+        `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=18&addressdetails=1&accept-language=en`
       );
       const data = await response.json();
       const address = data.address || {};
@@ -218,7 +218,8 @@ const CreateJob = () => {
     setSearchLoading(true);
     try {
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5`
+        // Restrict to Kenya to avoid picking a similarly-named place in another country.
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(query)}&format=json&limit=5&countrycodes=ke`
       );
       const data = await response.json();
       setSearchResults(data);
@@ -417,6 +418,10 @@ const CreateJob = () => {
     // Validate required fields
     if (!jobData.service || !jobData.description || !jobData.urgency || !jobData.location) {
       toast.error("Please fill in all required fields");
+      return;
+    }
+    if (jobData.latitude == null || jobData.longitude == null) {
+      toast.error("Please capture/select your GPS location (tap the GPS button or pick from search results)");
       return;
     }
 
@@ -889,7 +894,11 @@ const CreateJob = () => {
                   disabled={
                     (step === 1 && !jobData.service) ||
                     (step === 2 && !jobData.description && !jobData.problem) ||
-                    (step === 3 && (!jobData.urgency || !jobData.location))
+                    (step === 3 &&
+                      (!jobData.urgency ||
+                        !jobData.location ||
+                        jobData.latitude == null ||
+                        jobData.longitude == null))
                   }
                 >
                   Continue

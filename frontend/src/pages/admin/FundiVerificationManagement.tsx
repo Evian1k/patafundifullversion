@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Search, MapPin, FileText, CheckCircle, XCircle, AlertCircle, Loader2, Eye } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -34,6 +34,7 @@ interface PaginationInfo {
 
 export default function FundiVerificationManagement() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [fundis, setFundis] = useState<Fundi[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -46,6 +47,7 @@ export default function FundiVerificationManagement() {
   });
   const [selectedFundi, setSelectedFundi] = useState<Fundi | null>(null);
   const [showModal, setShowModal] = useState(false);
+  const [focusHandled, setFocusHandled] = useState(false);
 
   const fetchFundis = async (page = 1) => {
     setLoading(true);
@@ -92,6 +94,35 @@ export default function FundiVerificationManagement() {
       toast.error("Failed to load fundi details");
     }
   };
+
+  // If admin arrives from email link /admin/fundis?focus=<fundiProfileId>, open the modal directly.
+  useEffect(() => {
+    if (focusHandled) return;
+    const focusId = searchParams.get("focus");
+    if (!focusId) {
+      setFocusHandled(true);
+      return;
+    }
+
+    (async () => {
+      try {
+        const response = await apiClient.request(`/admin/fundis/${focusId}`, { includeAuth: true });
+        if (response?.fundi) {
+          setSelectedFundi(response.fundi);
+          setShowModal(true);
+        }
+      } catch {
+        // ignore
+      } finally {
+        // Remove param so refresh doesn't keep popping the modal
+        const next = new URLSearchParams(searchParams);
+        next.delete("focus");
+        setSearchParams(next, { replace: true });
+        setFocusHandled(true);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusHandled, searchParams]);
 
   const handleRefresh = () => {
     fetchFundis(pagination.page);

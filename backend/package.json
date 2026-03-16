@@ -10,6 +10,10 @@
     "setup-db": "node src/scripts/setup-db.js",
     "setup-admin": "node scripts/setup-admin.js",
     "reset-db": "node scripts/reset-database.js",
+    "clean": "node scripts/clean-all.js --yes",
+    "clean:non-admin": "node scripts/clean-non-admin.js --yes",
+    "smoke:fundi": "node scripts/smoke-fundi-flow.mjs",
+    "verify-smtp": "node scripts/verify-smtp.js",
     "migrate": "node src/scripts/migrate.js"
   },
   "keywords": [],

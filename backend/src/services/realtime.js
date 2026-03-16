@@ -2,6 +2,57 @@ import { verifyToken } from '../utils/jwt.js';
 import { query } from '../db.js';
 import { AppError } from '../utils/errors.js';
 
+const toRad = (deg) => (deg * Math.PI) / 180;
+function haversineKm(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+async function getCategoryPricing(category) {
+  const DEFAULT_BASE = parseFloat(process.env.DEFAULT_BASE_PRICE || '1000');
+  const DEFAULT_PER_KM = parseFloat(process.env.DEFAULT_PER_KM_RATE || '150');
+  if (!category) return { basePrice: DEFAULT_BASE, perKmRate: DEFAULT_PER_KM };
+  try {
+    const r = await query(
+      'SELECT base_price, per_km_rate FROM service_categories WHERE lower(name) = lower($1) LIMIT 1',
+      [category],
+    );
+    const row = r.rows[0];
+    return {
+      basePrice: row?.base_price != null ? parseFloat(row.base_price) : DEFAULT_BASE,
+      perKmRate: row?.per_km_rate != null ? parseFloat(row.per_km_rate) : DEFAULT_PER_KM,
+    };
+  } catch {
+    return { basePrice: DEFAULT_BASE, perKmRate: DEFAULT_PER_KM };
+  }
+}
+
+function computeEstimatedPrice(distanceKm, basePrice, perKmRate) {
+  const includedKm = parseFloat(process.env.PRICE_INCLUDED_KM || '2');
+  const billable = Math.max(0, distanceKm - includedKm);
+  const distanceFee = parseFloat((billable * perKmRate).toFixed(2));
+  const total = parseFloat((basePrice + distanceFee).toFixed(2));
+  return { estimatedPrice: total, distanceFee };
+}
+
+async function logJobStatusChange(jobId, oldStatus, newStatus, actor) {
+  try {
+    await query(
+      `INSERT INTO job_status_history (job_id, old_status, new_status, actor_id, actor_role, created_at)
+       VALUES ($1,$2,$3,$4,$5,NOW())`,
+      [jobId, oldStatus || null, newStatus, actor?.userId || null, actor?.role || null]
+    );
+  } catch {
+    // best-effort audit
+  }
+}
+
 // In-memory timers for job request expirations: jobRequestId -> timeout
 const jobRequestTimers = new Map();
 
@@ -24,6 +75,21 @@ export function emitToUser(userId, event, payload) {
   if (!socketId) return false;
   ioInstance.to(socketId).emit(event, payload);
   return true;
+}
+
+// Broadcast helper for admin dashboards (best-effort; only connected admins will receive).
+export async function emitToAdmins(event, payload) {
+  if (!ioInstance) return 0;
+  try {
+    const res = await query("SELECT id FROM users WHERE role = 'admin'");
+    let sent = 0;
+    for (const row of res.rows) {
+      if (emitToUser(row.id, event, payload)) sent++;
+    }
+    return sent;
+  } catch {
+    return 0;
+  }
 }
 
 export default function initRealtime(io) {
@@ -54,17 +120,6 @@ export default function initRealtime(io) {
         const lat = parseFloat(latitude);
         const lng = parseFloat(longitude);
         if (!Number.isNaN(lat) && !Number.isNaN(lng)) {
-          // ensure table exists
-          await query(`
-            CREATE TABLE IF NOT EXISTS fundi_locations (
-              user_id UUID PRIMARY KEY,
-              latitude DECIMAL(10,8),
-              longitude DECIMAL(11,8),
-              accuracy INTEGER,
-              online BOOLEAN DEFAULT true,
-              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-          `).catch(() => {});
           await query(
             `INSERT INTO fundi_locations (user_id, latitude, longitude, accuracy, online, updated_at)
              VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
@@ -77,6 +132,13 @@ export default function initRealtime(io) {
             [userId, lat, lng, accuracy ? parseInt(accuracy) : null, online === false ? false : true]
           ).catch(() => {});
 
+          // Store raw location history for compliance/playback
+          await query(
+            `INSERT INTO location_history (user_id, job_id, latitude, longitude, accuracy, source, created_at)
+             VALUES ($1, NULL, $2, $3, $4, 'socket', NOW())`,
+            [userId, lat, lng, accuracy ? parseInt(accuracy) : null]
+          ).catch(() => {});
+
           // find active jobs assigned to this fundi and emit location updates to the customer
           try {
             const jobsRes = await query(
@@ -84,6 +146,12 @@ export default function initRealtime(io) {
               [userId]
             );
             for (const job of jobsRes.rows) {
+              await query(
+                `INSERT INTO location_history (user_id, job_id, latitude, longitude, accuracy, source, created_at)
+                 VALUES ($1, $2, $3, $4, $5, 'socket', NOW())`,
+                [userId, job.id, lat, lng, accuracy ? parseInt(accuracy) : null]
+              ).catch(() => {});
+
               emitToUser(job.customer_id, 'fundi:location', {
                 jobId: job.id,
                 latitude: lat,
@@ -128,13 +196,23 @@ export default function initRealtime(io) {
           return;
         }
 
-        // CRITICAL: Check fundi is verified before accepting
+        // CRITICAL: Check fundi is verified + subscription is active before accepting
         const fundiVerify = await query(
-          'SELECT verification_status FROM fundi_profiles WHERE user_id = $1',
+          'SELECT verification_status, subscription_active, subscription_expires_at FROM fundi_profiles WHERE user_id = $1',
           [userId]
         );
-        if (fundiVerify.rows.length === 0 || fundiVerify.rows[0].verification_status !== 'approved') {
+        if (fundiVerify.rows.length === 0) {
+          socket.emit('fundi:response:failed', { message: 'Fundi profile not found' });
+          return;
+        }
+        const fp = fundiVerify.rows[0];
+        if (fp.verification_status !== 'approved') {
           socket.emit('fundi:response:failed', { message: 'Your account is not yet approved. Please complete verification.' });
+          return;
+        }
+        const subExpired = fp.subscription_expires_at && new Date(fp.subscription_expires_at) < new Date();
+        if (!fp.subscription_active || subExpired) {
+          socket.emit('fundi:response:failed', { message: 'Active subscription required to accept jobs' });
           return;
         }
 
@@ -191,9 +269,52 @@ export default function initRealtime(io) {
           `UPDATE jobs SET fundi_id = $1, status = 'accepted', updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
           [userId, jobId]
         );
+        await logJobStatusChange(jobId, job.status, 'accepted', { userId, role: 'fundi' });
+
+        // Distance-based pricing (keep socket accept consistent with HTTP accept endpoint)
+        let distanceKm = null;
+        let estimatedPrice = null;
+        try {
+          const jobRowRes = await query(
+            'SELECT latitude, longitude, category, estimated_price FROM jobs WHERE id = $1',
+            [jobId],
+          );
+          const jobRow = jobRowRes.rows[0];
+          if (jobRow?.latitude != null && jobRow?.longitude != null) {
+            const locRes = await query('SELECT latitude, longitude FROM fundi_locations WHERE user_id = $1', [userId]);
+            const loc = locRes.rows[0];
+            if (loc?.latitude != null && loc?.longitude != null) {
+              distanceKm = haversineKm(
+                parseFloat(jobRow.latitude),
+                parseFloat(jobRow.longitude),
+                parseFloat(loc.latitude),
+                parseFloat(loc.longitude),
+              );
+              const { basePrice, perKmRate } = await getCategoryPricing(jobRow.category);
+              const priced = computeEstimatedPrice(distanceKm, basePrice, perKmRate);
+              estimatedPrice = priced.estimatedPrice;
+              await query(
+                `UPDATE jobs
+                 SET estimated_price = COALESCE(estimated_price, $2),
+                     base_price = $3,
+                     distance_fee = $4,
+                     distance_km = $5,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = $1`,
+                [jobId, estimatedPrice, basePrice, priced.distanceFee, distanceKm],
+              );
+            }
+          }
+          if (estimatedPrice == null && jobRow?.estimated_price != null) {
+            const p = parseFloat(jobRow.estimated_price);
+            if (!Number.isNaN(p)) estimatedPrice = p;
+          }
+        } catch {
+          // ignore pricing failures; don't block accept
+        }
 
         // notify customer
-        emitToUser(job.customer_id, 'job:accepted', { jobId, fundiId: userId });
+        emitToUser(job.customer_id, 'job:accepted', { jobId, fundiId: userId, distanceKm, estimatedPrice });
         // ack to fundi
         socket.emit('fundi:response:ok', { jobId, accepted: true });
       } catch (err) {

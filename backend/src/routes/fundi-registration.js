@@ -625,7 +625,7 @@ router.post('/step/7/payment', authMiddleware, async (req, res, next) => {
         payment_method_verified = true,
         registration_step = 8,
         step_7_completed_at = CURRENT_TIMESTAMP,
-        verification_status = 'pending_admin_review',
+        verification_status = 'pending',
         updated_at = CURRENT_TIMESTAMP
        WHERE user_id = $2`,
       [cleanPhone, userId]
@@ -644,7 +644,7 @@ router.post('/step/7/payment', authMiddleware, async (req, res, next) => {
       message: 'Registration complete! Awaiting admin review...',
       profile: {
         registrationStep: 8,
-        verificationStatus: 'pending_admin_review',
+        verificationStatus: 'pending',
         mpesaNumber: cleanPhone
       }
     });

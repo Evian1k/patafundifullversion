@@ -5,6 +5,18 @@
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
+class ApiError extends Error {
+  status: number;
+  meta?: any;
+
+  constructor(message: string, status = 0, meta?: any) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.meta = meta;
+  }
+}
+
 class ApiClient {
   constructor() {
     this.token = localStorage.getItem('auth_token');
@@ -46,23 +58,60 @@ class ApiClient {
       config.body = JSON.stringify(config.body);
     }
 
-    const response = await fetch(url, config);
+    let response;
+    try {
+      response = await fetch(url, config);
+    } catch (e) {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : 'Network error';
+      throw new ApiError(msg || 'Network error', 0);
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({
         message: response.statusText,
       }));
-      throw new Error(error.message || 'API request failed');
+      const message = error?.message || response.statusText || 'API request failed';
+      throw new ApiError(message, response.status, error?.meta);
     }
 
     return response.json();
   }
 
   // Auth endpoints
-  async signup(email, password, fullName) {
+  async register(email, password, fullName, phone = null, role = 'customer') {
+    const data = await this.request('/auth/register', {
+      method: 'POST',
+      body: JSON.stringify({ email, password, fullName, phone, role }),
+      includeAuth: false,
+    });
+    return data;
+  }
+
+  async otpVerify(email, code, purpose = 'register') {
+    const data = await this.request('/auth/otp-verify', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, purpose }),
+      includeAuth: false,
+    });
+    if (data?.token) this.setToken(data.token);
+    return data;
+  }
+
+  async otpResend(email, purpose = 'register') {
+    return this.request('/auth/otp-resend', {
+      method: 'POST',
+      body: JSON.stringify({ email, purpose }),
+      includeAuth: false,
+    });
+  }
+
+  async signup(email, password, fullName, role = 'customer') {
     const data = await this.request('/auth/signup', {
       method: 'POST',
-      body: JSON.stringify({ email, password, fullName }),
+      body: JSON.stringify({ email, password, fullName, role }),
       includeAuth: false,
     });
 
@@ -95,7 +144,66 @@ class ApiClient {
   }
 
   async getCurrentUser() {
-    return this.request('/auth/me');
+    // Use /users/me so the frontend gets fullName + phone in one place.
+    // Keep /auth/me for any legacy code paths or admin-only checks.
+    return this.request('/users/me');
+  }
+
+  // User settings/profile
+  async updateMe({ fullName = null, phone = null } = {}) {
+    return this.request('/users/me', {
+      method: 'PUT',
+      body: JSON.stringify({ fullName, phone }),
+    });
+  }
+
+  async getUserSettings() {
+    return this.request('/users/settings');
+  }
+
+  async updateUserSettings(payload) {
+    return this.request('/users/settings', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async getSavedPlaces() {
+    return this.request('/users/saved-places');
+  }
+
+  async addSavedPlace(place) {
+    return this.request('/users/saved-places', {
+      method: 'POST',
+      body: JSON.stringify(place),
+    });
+  }
+
+  async updateSavedPlace(id, updates) {
+    return this.request(`/users/saved-places/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  }
+
+  async deleteSavedPlace(id) {
+    return this.request(`/users/saved-places/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async changePassword(currentPassword, newPassword) {
+    return this.request('/users/change-password', {
+      method: 'POST',
+      body: JSON.stringify({ currentPassword, newPassword }),
+    });
+  }
+
+  async deleteAccount(password) {
+    return this.request('/users/delete-account', {
+      method: 'POST',
+      body: JSON.stringify({ password }),
+    });
   }
 
   // Fundi endpoints
@@ -121,6 +229,10 @@ class ApiClient {
 
   async getFundiProfile() {
     return this.request('/fundi/profile');
+  }
+
+  async getFundiApprovalStatus() {
+    return this.request('/fundi/approval-status');
   }
 
   async updateFundiProfile(data) {
@@ -198,6 +310,25 @@ class ApiClient {
     return this.request(`/jobs/${jobId}`);
   }
 
+  async getJobStatus(jobId) {
+    return this.request(`/jobs/${jobId}/status`);
+  }
+
+  async getJobLocation(jobId) {
+    return this.request(`/jobs/${jobId}/location`);
+  }
+
+  async getFundiActiveJob() {
+    return this.request('/jobs/fundi/active');
+  }
+
+  async cancelJob(jobId, reason = null) {
+    return this.request(`/jobs/${jobId}/cancel`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  }
+
   async updateJobStatus(jobId, status) {
     return this.request(`/jobs/${jobId}/status`, {
       method: 'PATCH',
@@ -272,6 +403,13 @@ class ApiClient {
 
   async getJobPhotos(jobId) {
     return this.request(`/jobs/${jobId}/photos`);
+  }
+
+  async confirmJobCompletion(jobId, code) {
+    return this.request(`/jobs/${jobId}/confirm-completion`, {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
   }
 
   // Payment endpoints

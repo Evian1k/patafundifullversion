@@ -10,20 +10,24 @@ export function useJobRequest() {
   const [remaining, setRemaining] = useState<number>(0);
 
   useEffect(() => {
+    let interval: number | null = null;
+
     const handleJobRequest = (data: any) => {
       console.log('Job request received:', data);
       setJobRequest(data);
       
       // Start countdown
       if (data.expiresAt) {
+        if (interval) window.clearInterval(interval);
         const expiryTime = new Date(data.expiresAt).getTime();
-        const interval = setInterval(() => {
+        interval = window.setInterval(() => {
           const now = Date.now();
           const diff = Math.max(0, Math.floor((expiryTime - now) / 1000));
           setRemaining(diff);
-          if (diff === 0) clearInterval(interval);
-        }, 100);
-        return () => clearInterval(interval);
+          if (diff === 0 && interval) window.clearInterval(interval);
+        }, 1000);
+      } else {
+        setRemaining(0);
       }
     };
 
@@ -62,6 +66,7 @@ export function useJobRequest() {
     realtimeService.on('job:accepted', handleJobAccepted);
 
     return () => {
+      if (interval) window.clearInterval(interval);
       realtimeService.off('job:request', handleJobRequest);
       realtimeService.off('job:request:declined', handleJobRejected);
       realtimeService.off('fundi:response:ok', handleFundiResponseOk);

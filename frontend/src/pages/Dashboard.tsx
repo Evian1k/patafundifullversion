@@ -1,4 +1,3 @@
-import { Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { motion } from "framer-motion";
@@ -7,8 +6,6 @@ import {
   Clock, 
   CheckCircle, 
   MapPin, 
-  Star, 
-  MessageSquare,
   LogOut,
   Settings,
   Wrench,
@@ -33,7 +30,7 @@ interface JobData {
 
 const Dashboard = () => {
   const navigate = useNavigate();
-  const [user, setUser] = useState<{ id?: string; email?: string } | null>(null);
+  const [user, setUser] = useState<{ id?: string; email?: string; fullName?: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeJobs, setActiveJobs] = useState<JobData[]>([]);
   const [recentJobs, setRecentJobs] = useState<JobData[]>([]);
@@ -55,6 +52,17 @@ const Dashboard = () => {
     try {
       const userData = await apiClient.getCurrentUser();
       setUser(userData.user);
+
+      const role = (userData?.user?.role || "").toLowerCase();
+      if (role === "admin") {
+        navigate("/admin/dashboard");
+        return;
+      }
+      if (role === "fundi" || role === "fundi_pending") {
+        navigate(role === "fundi" ? "/fundi" : "/fundi/pending");
+        return;
+      }
+
       await fetchUserJobs();
     } catch (error) {
       console.error("Failed to load user data:", error);
@@ -75,7 +83,7 @@ const Dashboard = () => {
         const jobs = response.jobs;
         
         // Separate active and completed jobs
-        const active = jobs.filter(j => ['pending', 'matching', 'accepted', 'in_progress'].includes(j.status));
+        const active = jobs.filter(j => ['pending', 'matching', 'accepted', 'on_the_way', 'arrived', 'in_progress'].includes(j.status));
         const completed = jobs.filter(j => j.status === 'completed');
         
         setActiveJobs(active);
@@ -96,7 +104,7 @@ const Dashboard = () => {
     }
 
     try {
-      await apiClient.updateJobStatus(jobId, 'cancelled');
+      await apiClient.cancelJob(jobId, 'Customer cancelled from dashboard');
 
       // Remove from active jobs
       setActiveJobs(activeJobs.filter((job) => job.id !== jobId));
@@ -140,14 +148,6 @@ const Dashboard = () => {
               <Button 
                 variant="ghost" 
                 size="icon"
-                onClick={() => navigate("/admin/verify-fundis")}
-                title="AI Fundi Verification"
-              >
-                <Zap className="w-5 h-5" />
-              </Button>
-              <Button 
-                variant="ghost" 
-                size="icon"
                 onClick={() => navigate("/settings")}
               >
                 <Settings className="w-5 h-5" />
@@ -168,7 +168,7 @@ const Dashboard = () => {
           className="mb-8"
         >
           <h1 className="text-2xl font-display font-bold text-foreground mb-1">
-            Hello, {user?.user_metadata?.full_name?.split(" ")[0] || "there"}! 👋
+            Hello, {user?.fullName?.split(" ")[0] || "there"}!
           </h1>
           <p className="text-muted-foreground">What needs fixing today?</p>
         </motion.div>
@@ -222,12 +222,16 @@ const Dashboard = () => {
                   pending: "bg-yellow-500/10 text-yellow-600",
                   matching: "bg-blue-500/10 text-blue-600",
                   accepted: "bg-purple-500/10 text-purple-600",
+                  on_the_way: "bg-purple-500/10 text-purple-600",
+                  arrived: "bg-purple-500/10 text-purple-600",
                   in_progress: "bg-accent/10 text-accent",
                 };
                 const statusLabels: { [key: string]: string } = {
                   pending: "Pending",
                   matching: "Finding Fundis",
                   accepted: "Accepted",
+                  on_the_way: "On the Way",
+                  arrived: "Arrived",
                   in_progress: "In Progress",
                 };
 
@@ -236,7 +240,16 @@ const Dashboard = () => {
                     key={job.id}
                     initial={{ opacity: 0, x: -20 }}
                     animate={{ opacity: 1, x: 0 }}
-                    className="p-4 rounded-xl bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow"
+                    className="p-4 rounded-xl bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow cursor-pointer"
+                    onClick={() => navigate(`/job/${job.id}/tracking`)}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        navigate(`/job/${job.id}/tracking`);
+                      }
+                    }}
                   >
                     {/* Job Header */}
                     <div className="flex items-start justify-between mb-3">
@@ -257,6 +270,9 @@ const Dashboard = () => {
                           onClick={() => cancelJob(job.id)}
                           className="p-2 rounded-lg text-red-500 hover:bg-red-500/10 transition-colors"
                           title="Cancel job"
+                          // prevent opening tracking when clicking cancel
+                          onMouseDown={(e) => e.stopPropagation()}
+                          onClickCapture={(e) => e.stopPropagation()}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>

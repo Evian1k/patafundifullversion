@@ -10,6 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import db from '../src/db.js';
+import { SCHEMA } from '../src/db/schema.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -43,7 +44,12 @@ async function resetDatabase() {
     console.log('\n📝 Recreating schema...');
     
     // Now recreate the schema
-    await import('../src/db/schema.js');
+    const statements = SCHEMA.split(';').filter(stmt => stmt.trim());
+    for (const statement of statements) {
+      if (statement.trim()) {
+        await db.query(statement);
+      }
+    }
     
     console.log('✅ Schema created successfully');
     

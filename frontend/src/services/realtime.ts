@@ -83,8 +83,8 @@ class RealtimeService {
   }
 
   // Fundi location update
-  updateLocation(latitude: number, longitude: number, accuracy?: number) {
-    this.send('fundi:location:update', { latitude, longitude, accuracy });
+  updateLocation(latitude: number, longitude: number, accuracy?: number, online?: boolean) {
+    this.send('fundi:location:update', { latitude, longitude, accuracy, online });
   }
 
   // Fundi response to job request

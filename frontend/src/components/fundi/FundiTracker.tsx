@@ -1,11 +1,13 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Button } from '@/components/ui/button';
-import { Phone, MessageCircle, MapPin, Clock, Star } from 'lucide-react';
+import { Phone, MessageCircle, X, Navigation, ShieldCheck, Wrench } from 'lucide-react';
 import { io, Socket } from 'socket.io-client';
 import { apiClient } from '@/lib/api';
 import './fundi-tracker.css';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
+import { InputOTP, InputOTPGroup, InputOTPSlot, InputOTPSeparator } from '@/components/ui/input-otp';
+import { toast } from 'sonner';
 
 // Fix Leaflet marker icons
 delete ((L.Icon.Default.prototype as unknown) as Record<string, unknown>)._getIconUrl;
@@ -30,9 +32,28 @@ type Status =
   | 'matched'
   | 'accepted'
   | 'on_the_way'
+  | 'arrived'
   | 'in_progress'
   | 'completed'
+  | 'cancelled'
   | 'failed';
+
+function normalizeJobStatus(raw?: string): Status {
+  const s = String(raw || '').toLowerCase().trim();
+  // Backend statuses: requested, pending, matching, accepted, on_the_way, arrived, in_progress, completed, cancelled
+  if (!s) return 'searching';
+  if (['requested', 'pending', 'matching', 'searching'].includes(s)) return 'searching';
+  if (s === 'matched') return 'matched';
+  if (s === 'accepted') return 'accepted';
+  if (s === 'on_the_way') return 'on_the_way';
+  if (s === 'arrived') return 'arrived';
+  if (s === 'in_progress') return 'in_progress';
+  if (s === 'completed') return 'completed';
+  if (s === 'cancelled' || s === 'canceled') return 'cancelled';
+  if (s === 'failed') return 'failed';
+  // Unknown status should not blank the UI
+  return 'searching';
+}
 
 export default function FundiTracker({
   onComplete,
@@ -41,15 +62,31 @@ export default function FundiTracker({
   onComplete?: () => void;
   jobId?: string;
 }) {
-  const [status, setStatus] = useState<Status>('searching');
+  const [jobStatusRaw, setJobStatusRaw] = useState<string>('searching');
+  const status = normalizeJobStatus(jobStatusRaw);
   const [fundi, setFundi] = useState<FundiInfo | null>(null);
   const [eta, setEta] = useState<number | null>(null);
   const [progressMsg, setProgressMsg] = useState('Finding nearby fundi...');
+  const [searchRadiusKm, setSearchRadiusKm] = useState<number | null>(null);
+  const [estimatedPrice, setEstimatedPrice] = useState<number | null>(null);
+  const [searchFailed, setSearchFailed] = useState<boolean>(false);
   const blockBackRef = useRef<boolean>(false);
   const socketRef = useRef<Socket | null>(null);
   const [customerLocation, setCustomerLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [fundiLocation, setFundiLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [hasAuth, setHasAuth] = useState<boolean>(true);
+  const [completionOtp, setCompletionOtp] = useState('');
+  const [completionConfirmed, setCompletionConfirmed] = useState(false);
+  const [mpesaNumber, setMpesaNumber] = useState('');
+  const [paymentStatus, setPaymentStatus] = useState<'idle' | 'processing' | 'initiated' | 'confirmed' | 'failed'>('idle');
+  const [paymentMsg, setPaymentMsg] = useState<string>('');
+
+  const mapRef = useRef<L.Map | null>(null);
+  const customerMarkerRef = useRef<L.Marker | null>(null);
+  const fundiMarkerRef = useRef<L.Marker | null>(null);
+  const searchCircleRef = useRef<L.Circle | null>(null);
+  const searchPulseTimerRef = useRef<number | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
 
   // Check auth status
   useEffect(() => {
@@ -69,7 +106,7 @@ export default function FundiTracker({
     };
     window.addEventListener('beforeunload', onBeforeUnload);
 
-    blockBackRef.current = status === 'searching' || status === 'matched';
+    blockBackRef.current = status === 'searching' || status === 'matched' || status === 'accepted';
 
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, [status]);
@@ -85,7 +122,7 @@ export default function FundiTracker({
     
     if (!token) {
       console.error('No auth token found - user must be logged in');
-      setStatus('failed');
+      setJobStatusRaw('failed');
       return;
     }
     
@@ -107,18 +144,39 @@ export default function FundiTracker({
     
     socket.on('auth:error', (err) => {
       console.error('Socket auth error:', err);
-      setStatus('failed');
+      setJobStatusRaw('failed');
     });
     
     socket.on('connect_error', (err) => {
       console.error('Socket connection error:', err);
-      setStatus('failed');
+      setJobStatusRaw('failed');
+    });
+
+    socket.on('job:matching', (payload) => {
+      // { jobId, candidates: [...] }
+      if (!payload || payload.jobId !== jobId) return;
+      setSearchFailed(false);
+      setJobStatusRaw('matching');
+      const count = Array.isArray(payload.candidates) ? payload.candidates.length : null;
+      const radius = payload.radiusKm != null ? Number(payload.radiusKm) : null;
+      const price = payload.estimatedPrice != null ? Number(payload.estimatedPrice) : null;
+      if (Number.isFinite(radius as any)) setSearchRadiusKm(radius);
+      if (Number.isFinite(price as any)) setEstimatedPrice(price);
+      if (count && radius) {
+        setProgressMsg(`Notifying ${count} fundis within ${radius} km...`);
+      } else if (count) {
+        setProgressMsg(`Notifying ${count} nearby fundis...`);
+      } else if (radius) {
+        setProgressMsg(`Searching within ${radius} km...`);
+      } else {
+        setProgressMsg('Notifying nearby fundis...');
+      }
     });
 
     socket.on('job:matched', async (payload) => {
       console.log('Received job:matched', payload);
       if (!payload || payload.jobId !== jobId) return;
-      setStatus('matched');
+      setJobStatusRaw('matched');
       // fetch fundi profile
       try {
         const fundiRes = await apiClient.getFundi(payload.fundiId);
@@ -142,17 +200,68 @@ export default function FundiTracker({
 
     socket.on('job:accepted', (payload) => {
       if (!payload || payload.jobId !== jobId) return;
-      setStatus('accepted');
+      setSearchFailed(false);
+      setJobStatusRaw('accepted');
+      if (payload.estimatedPrice != null) {
+        const p = Number(payload.estimatedPrice);
+        if (Number.isFinite(p)) setEstimatedPrice(p);
+      }
+      if (payload.fundiId) {
+        (async () => {
+          try {
+            const fundiRes = await apiClient.getFundi(payload.fundiId);
+            if (fundiRes?.fundi) {
+              const f = fundiRes.fundi;
+              setFundi({
+                id: f.id,
+                name: `${f.firstName} ${f.lastName}`,
+                skill: f.skills?.[0] || f.locationCity || 'Fundi',
+                distanceKm: payload.distanceKm ? Number(payload.distanceKm) : 0,
+                rating: f.rating || 4.5,
+                avatarUrl: f.avatarUrl || f.avatar_url || '/assets/default-avatar.png'
+              });
+            }
+          } catch (e) {
+            // ignore
+          }
+        })();
+      }
     });
 
     socket.on('job:rejected', (payload) => {
       if (!payload || payload.jobId !== jobId) return;
-      setStatus('searching');
+      setJobStatusRaw('matching');
+      setProgressMsg('Finding another fundi...');
+    });
+
+    socket.on('job:cancelled', (payload) => {
+      if (!payload || payload.jobId !== jobId) return;
+      setJobStatusRaw('cancelled');
+      setProgressMsg('Job cancelled');
+    });
+
+    socket.on('job:search:failed', (payload) => {
+      if (!payload || payload.jobId !== jobId) return;
+      setSearchFailed(true);
+      setJobStatusRaw('failed');
+      setProgressMsg('No fundis found nearby. Try again in a few minutes or adjust your request.');
     });
 
     socket.on('fundi:location', (payload) => {
       if (!payload || payload.jobId !== jobId) return;
       setFundiLocation({ latitude: payload.latitude, longitude: payload.longitude });
+    });
+
+    socket.on('job:completed', (payload) => {
+      if (!payload || payload.jobId !== jobId) return;
+      setJobStatusRaw('completed');
+      setPaymentMsg(payload.message || 'Job completed');
+    });
+
+    socket.on('payment:confirmed', (payload) => {
+      if (!payload || payload.jobId !== jobId) return;
+      setPaymentStatus('confirmed');
+      setPaymentMsg('Payment confirmed. Thank you!');
     });
 
     // fetch job details and customer location
@@ -164,9 +273,17 @@ export default function FundiTracker({
         console.log('Job fetched:', res?.job);
         if (res?.job) {
           const job = res.job;
-          setStatus(job.status as Status);
+          setJobStatusRaw(job.status || 'searching');
           if (job.latitude && job.longitude) {
             setCustomerLocation({ latitude: parseFloat(job.latitude), longitude: parseFloat(job.longitude) });
+          }
+          if (job.match_radius_km != null) {
+            const r = Number(job.match_radius_km);
+            if (Number.isFinite(r)) setSearchRadiusKm(r);
+          }
+          if (job.estimatedPrice != null || job.estimated_price != null) {
+            const p = Number(job.estimatedPrice ?? job.estimated_price);
+            if (Number.isFinite(p)) setEstimatedPrice(p);
           }
           if (job.fundiId) {
             // fetch fundi profile
@@ -192,7 +309,7 @@ export default function FundiTracker({
         }
       } catch (e) {
         console.error('Failed to load job', e);
-        setStatus('failed');
+        setJobStatusRaw('failed');
       }
     })();
 
@@ -202,40 +319,27 @@ export default function FundiTracker({
     };
   }, [jobId, hasAuth]);
 
-  // Initialize and manage map
+  // Initialize map once (full-screen). Update markers as locations change.
   useEffect(() => {
-    if (!['on_the_way', 'in_progress'].includes(status)) {
-      return;
-    }
+    const el = document.getElementById('tracking-map');
+    if (!el) return;
 
-    const mapEl = document.getElementById('tracking-map');
-    if (!mapEl) {
-      console.warn('Map element not found');
-      return;
-    }
-
-    // Check if map already exists
-    const mapElement = mapEl as unknown as Record<string, unknown>;
-    if (mapElement._leaflet_id) {
-      console.log('Map already initialized');
-      return;
-    }
-
-    try {
-      // Initialize map with customer location or default
+    if (!mapRef.current) {
       const lat = customerLocation?.latitude || -1.286389;
       const lng = customerLocation?.longitude || 36.817223;
-      
-      const map = L.map('tracking-map').setView([lat, lng], 15);
-      
-      // Add tile layer
+
+      const map = L.map('tracking-map', {
+        zoomControl: false,
+        attributionControl: false,
+      }).setView([lat, lng], 15);
+
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '© OpenStreetMap contributors',
         maxZoom: 19,
       }).addTo(map);
 
-      // Add customer location marker
-      L.marker([lat, lng], {
+      mapRef.current = map;
+
+      customerMarkerRef.current = L.marker([lat, lng], {
         title: 'Your location',
         icon: L.icon({
           iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png',
@@ -243,52 +347,163 @@ export default function FundiTracker({
           iconSize: [25, 41],
           iconAnchor: [12, 41],
           popupAnchor: [1, -34],
-          shadowSize: [41, 41]
-        })
-      }).addTo(map).bindPopup('Your location');
+          shadowSize: [41, 41],
+        }),
+      }).addTo(map);
 
-      // Add fundi location marker if available
-      if (fundiLocation) {
-        L.marker([fundiLocation.latitude, fundiLocation.longitude], {
-          title: 'Fundi location',
-          icon: L.icon({
-            iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
-            shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
-            iconSize: [25, 41],
-            iconAnchor: [12, 41],
-            popupAnchor: [1, -34],
-            shadowSize: [41, 41]
-          })
-        }).addTo(map).bindPopup('Fundi location');
+      // Fix: Leaflet often renders tiles with the initial (wrong) container size.
+      // Invalidate size after layout settles so tiles fill the full screen.
+      const invalidate = () => {
+        try {
+          map.invalidateSize(true);
+        } catch (e) {
+          // ignore
+        }
+      };
+      requestAnimationFrame(invalidate);
+      window.setTimeout(invalidate, 120);
+      window.setTimeout(invalidate, 420);
 
-        // Fit map to both markers
-        const bounds = L.latLngBounds([
-          [lat, lng],
-          [fundiLocation.latitude, fundiLocation.longitude]
-        ]);
-        map.fitBounds(bounds, { padding: [50, 50] });
+      const onResize = () => invalidate();
+      window.addEventListener('resize', onResize);
+      window.addEventListener('orientationchange', onResize);
+      (map as any)._fixit_onResize = onResize;
+
+      // Also invalidate whenever the container size changes (flex layout / bottom panel height, etc.)
+      try {
+        const ro = new ResizeObserver(() => invalidate());
+        ro.observe(el);
+        resizeObserverRef.current = ro;
+      } catch (e) {
+        // ResizeObserver not available; window resize handler above is the fallback.
+      }
+    }
+
+    return () => {
+      // stop any searching pulse timer
+      if (searchPulseTimerRef.current) {
+        window.clearInterval(searchPulseTimerRef.current);
+        searchPulseTimerRef.current = null;
       }
 
-      console.log('Map initialized successfully');
+      const map = mapRef.current as any;
+      if (map?._fixit_onResize) {
+        window.removeEventListener('resize', map._fixit_onResize);
+        window.removeEventListener('orientationchange', map._fixit_onResize);
+      }
+      if (resizeObserverRef.current) {
+        try {
+          resizeObserverRef.current.disconnect();
+        } catch (e) {
+          // ignore
+        }
+        resizeObserverRef.current = null;
+      }
+      mapRef.current?.remove();
+      mapRef.current = null;
+      customerMarkerRef.current = null;
+      fundiMarkerRef.current = null;
+      searchCircleRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-      // Cleanup
-      return () => {
-        map.remove();
-      };
-    } catch (error) {
-      console.error('Failed to initialize map:', error);
+  useEffect(() => {
+    if (!mapRef.current) return;
+    const map = mapRef.current;
+
+    const cLat = customerLocation?.latitude || -1.286389;
+    const cLng = customerLocation?.longitude || 36.817223;
+    customerMarkerRef.current?.setLatLng([cLat, cLng]);
+
+    // When we first learn the customer's GPS, ensure the map recenters and tiles fully render.
+    if (status === 'searching' && customerLocation?.latitude && customerLocation?.longitude) {
+      try {
+        map.setView([cLat, cLng], 15, { animate: true });
+        map.invalidateSize(true);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Searching ring (Uber-ish scanning feel)
+    const shouldShowSearch = status === 'searching';
+    if (shouldShowSearch) {
+      if (!searchCircleRef.current) {
+        searchCircleRef.current = L.circle([cLat, cLng], {
+          radius: 900,
+          color: '#60a5fa',
+          weight: 1,
+          fillColor: '#3b82f6',
+          fillOpacity: 0.10,
+        }).addTo(map);
+      } else {
+        searchCircleRef.current.setLatLng([cLat, cLng]);
+      }
+
+      // Simple pulse (no heavy animation libs): gently expand/contract the search radius.
+      if (!searchPulseTimerRef.current) {
+        let dir = 1;
+        let r = 900;
+        searchPulseTimerRef.current = window.setInterval(() => {
+          if (!searchCircleRef.current) return;
+          r += dir * 80;
+          if (r >= 1150) dir = -1;
+          if (r <= 780) dir = 1;
+          searchCircleRef.current.setRadius(r);
+        }, 350);
+      }
+    } else if (searchCircleRef.current) {
+      searchCircleRef.current.remove();
+      searchCircleRef.current = null;
+      if (searchPulseTimerRef.current) {
+        window.clearInterval(searchPulseTimerRef.current);
+        searchPulseTimerRef.current = null;
+      }
+    }
+
+    if (fundiLocation?.latitude && fundiLocation?.longitude) {
+      const fLat = parseFloat(String(fundiLocation.latitude));
+      const fLng = parseFloat(String(fundiLocation.longitude));
+      if (!Number.isNaN(fLat) && !Number.isNaN(fLng)) {
+        if (!fundiMarkerRef.current) {
+          fundiMarkerRef.current = L.marker([fLat, fLng], {
+            title: 'Fundi location',
+            icon: L.icon({
+              iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png',
+              shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+              iconSize: [25, 41],
+              iconAnchor: [12, 41],
+              popupAnchor: [1, -34],
+              shadowSize: [41, 41],
+            }),
+          }).addTo(map);
+        } else {
+          fundiMarkerRef.current.setLatLng([fLat, fLng]);
+        }
+
+        const bounds = L.latLngBounds([
+          [cLat, cLng],
+          [fLat, fLng],
+        ]);
+        map.fitBounds(bounds, { padding: [70, 70] });
+      }
+    } else {
+      // If no fundi yet, keep map centered on the customer.
+      if (status === 'searching') map.setView([cLat, cLng], 15, { animate: true });
     }
   }, [status, customerLocation, fundiLocation]);
 
   const handleRetry = () => {
-    setStatus('searching');
+    setJobStatusRaw('matching');
+    setProgressMsg('Finding nearby fundi...');
     setFundi(null);
     setEta(null);
   };
 
   const phoneLink = fundi ? `tel:+254700000000` : '#';
 
-  console.log('FundiTracker: rendering with status=', status, 'fundi=', fundi, 'jobId=', jobId);
+  console.log('FundiTracker: rendering with status=', status, 'rawStatus=', jobStatusRaw, 'fundi=', fundi, 'jobId=', jobId);
 
   // Safety check: if no jobId, show error
   if (!jobId) {
@@ -326,91 +541,316 @@ export default function FundiTracker({
     );
   }
 
+  const panelContent = (() => {
+    if (status === 'searching') {
+      return (
+        <>
+          <div className="sheet-title">Searching nearby fundis</div>
+          <div className="sheet-sub">{progressMsg || 'Notifying verified fundis around you'}</div>
+          {(searchRadiusKm || estimatedPrice) && (
+            <div className="sheet-sub" style={{ marginTop: 8 }}>
+              {searchRadiusKm ? `Search radius: ${searchRadiusKm} km` : null}
+              {searchRadiusKm && estimatedPrice ? ' • ' : null}
+              {estimatedPrice ? `Est. price: KES ${Math.round(estimatedPrice)}` : null}
+            </div>
+          )}
+          <div className="sheet-row">
+            <div className="pulse-dots" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </div>
+            <div className="status-pill">MATCHING</div>
+          </div>
+          <div className="sheet-row" style={{ marginTop: 10 }}>
+            <div className="sheet-sub" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <ShieldCheck size={16} />
+              Only approved, subscription-active fundis are notified.
+            </div>
+          </div>
+
+          <div className="actions large-actions large-actions-top">
+            <button
+              className="action-btn call"
+              onClick={async () => {
+                try {
+                  await apiClient.cancelJob(jobId!, 'Customer cancelled while searching');
+                  setJobStatusRaw('cancelled');
+                  toast.success('Job cancelled');
+                } catch (e: any) {
+                  toast.error(e?.message || 'Failed to cancel job');
+                }
+              }}
+            >
+              <X size={20} />
+              <span>Cancel</span>
+            </button>
+            <button
+              className="action-btn message"
+              onClick={() => {
+                if (!mapRef.current) return;
+                const lat = customerLocation?.latitude || -1.286389;
+                const lng = customerLocation?.longitude || 36.817223;
+                mapRef.current.setView([lat, lng], 15, { animate: true });
+                try { mapRef.current.invalidateSize(true); } catch (e) {}
+              }}
+            >
+              <Navigation size={20} />
+              <span>Center</span>
+            </button>
+          </div>
+
+          <div className="actions large-actions" style={{ marginTop: 10 }}>
+            <a className="action-btn message" href="/dashboard" style={{ flex: "1 1 100%" }}>
+              <Wrench size={20} />
+              <span>Dashboard</span>
+            </a>
+          </div>
+        </>
+      );
+    }
+
+    if (status === 'failed') {
+      return (
+        <>
+          <div className="sheet-title">{searchFailed ? 'No fundi found' : 'Could not load tracking'}</div>
+          <div className="sheet-sub">
+            {progressMsg || (searchFailed ? 'No available fundis in your area right now.' : 'Please check your connection and try again.')}
+          </div>
+          <div className="actions large-actions">
+            <a className="action-btn message" href="/create-job">New job</a>
+            <a className="action-btn call" href="/dashboard">Dashboard</a>
+          </div>
+        </>
+      );
+    }
+
+    if (status === 'cancelled') {
+      return (
+        <>
+          <div className="sheet-title">Job cancelled</div>
+          <div className="sheet-sub">You can create a new request anytime.</div>
+          <div className="actions large-actions">
+            <a className="action-btn message" href="/create-job">New job</a>
+            <a className="action-btn call" href="/dashboard">Dashboard</a>
+          </div>
+        </>
+      );
+    }
+
+    if (status === 'completed') {
+      return (
+        <>
+          <div className="sheet-title">Job completed</div>
+          <div className="sheet-sub">{paymentMsg || 'Confirm completion and pay to release funds.'}</div>
+
+          {!completionConfirmed ? (
+            <div style={{ marginTop: 12 }}>
+              <div className="sheet-sub">Enter the 6-digit OTP sent to your email</div>
+              <div style={{ marginTop: 10, display: 'flex', justifyContent: 'center' }}>
+                <InputOTP maxLength={6} value={completionOtp} onChange={(v) => setCompletionOtp(v)}>
+                  <InputOTPGroup>
+                    <InputOTPSlot index={0} />
+                    <InputOTPSlot index={1} />
+                    <InputOTPSlot index={2} />
+                  </InputOTPGroup>
+                  <InputOTPSeparator />
+                  <InputOTPGroup>
+                    <InputOTPSlot index={3} />
+                    <InputOTPSlot index={4} />
+                    <InputOTPSlot index={5} />
+                  </InputOTPGroup>
+                </InputOTP>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <Button
+                  onClick={async () => {
+                    try {
+                      await apiClient.confirmJobCompletion(jobId!, completionOtp);
+                      setCompletionConfirmed(true);
+                      setPaymentMsg('Completion confirmed. You can now pay.');
+                    } catch (e: any) {
+                      setPaymentMsg(e?.message || 'OTP verification failed');
+                    }
+                  }}
+                  disabled={completionOtp.trim().length !== 6}
+                  className="w-full"
+                >
+                  Confirm Completion
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ marginTop: 12 }}>
+              <div className="sheet-sub">M-Pesa number</div>
+              <input
+                value={mpesaNumber}
+                onChange={(e) => setMpesaNumber(e.target.value)}
+                placeholder="0712345678"
+                className="w-full h-11 px-3 rounded-lg border border-white/10 bg-black/20 text-white outline-none"
+                style={{ marginTop: 8 }}
+              />
+              <div style={{ marginTop: 10 }}>
+                <Button
+                  onClick={async () => {
+                    try {
+                      setPaymentStatus('processing');
+                      const res = await apiClient.processPayment(jobId!, 'mpesa', mpesaNumber || null);
+                      setPaymentStatus('initiated');
+                      setPaymentMsg(res?.message || 'Payment initiated. Check your phone.');
+                    } catch (e: any) {
+                      setPaymentStatus('failed');
+                      setPaymentMsg(e?.message || 'Payment failed');
+                    }
+                  }}
+                  disabled={paymentStatus === 'processing' || paymentStatus === 'confirmed'}
+                  className="w-full"
+                >
+                  {paymentStatus === 'processing' ? 'Processing...' : paymentStatus === 'confirmed' ? 'Paid' : 'Pay Now'}
+                </Button>
+              </div>
+              <div style={{ marginTop: 10 }}>
+                <Button variant="outline" onClick={() => onComplete?.()} disabled={paymentStatus !== 'confirmed'} className="w-full">
+                  Done
+                </Button>
+              </div>
+            </div>
+          )}
+        </>
+      );
+    }
+
+    if (['matched', 'accepted', 'on_the_way', 'arrived', 'in_progress'].includes(status)) {
+      if (!fundi) {
+        return (
+          <>
+            <div className="sheet-title">Fundi assigned</div>
+            <div className="sheet-sub">Loading fundi profile...</div>
+          </>
+        );
+      }
+
+      return (
+        <>
+          <div className="sheet-title">{status === 'matched' ? 'Fundi found' : `${fundi.name}`}</div>
+          <div className="sheet-sub">
+            {status === 'matched' && 'Waiting for them to accept'}
+            {status === 'accepted' && 'They accepted your request'}
+            {status === 'on_the_way' && 'Heading to your location'}
+            {status === 'arrived' && 'Fundi has arrived'}
+            {status === 'in_progress' && 'Work in progress'}
+          </div>
+
+          <div className="sheet-row">
+            <div className="status-pill">{status.replace(/_/g, ' ').toUpperCase()}</div>
+            <div className="eta">{eta ? `ETA ${eta} min` : ''}</div>
+          </div>
+
+          <div style={{ marginTop: 12 }}>
+            <div className="fundi-card slide-up">
+              <img
+                src={fundi.avatarUrl}
+                alt={fundi.name}
+                className="avatar"
+                onError={(e) => { (e.target as HTMLImageElement).src = '/assets/default-avatar.png'; }}
+              />
+              <div className="meta">
+                <div className="name">{fundi.name}</div>
+                <div className="skill">{fundi.skill}</div>
+                <div className="details">{fundi.distanceKm ? `${fundi.distanceKm} km` : ''} • {fundi.rating} ★</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="actions large-actions">
+            <a href={phoneLink} className="action-btn call" aria-label="Call Fundi">
+              <Phone size={20} />
+              <span>Call</span>
+            </a>
+            <button
+              className="action-btn message"
+              onClick={() => toast.message('Chat is enabled in realtime API; UI wiring is next.')}
+            >
+              <MessageCircle size={20} />
+              <span>Chat</span>
+            </button>
+          </div>
+        </>
+      );
+    }
+
+    return (
+      <>
+        <div className="sheet-title">Working on it...</div>
+        <div className="sheet-sub">Status: {status}</div>
+      </>
+    );
+  })();
+
   return (
     <div className={`fundi-tracker root-status-${status}`}>
-      {/* Full-screen status view */}
-      <div className="status-screen">
-        <div className="status-center">
-          {['searching', 'requested'].includes(status) && (
-            <div className="searching-block">
-              <div className="ripple-map">
-                <div className="pin" />
-                <div className="ripple" />
-                <div className="ripple delay" />
-              </div>
-              <p className="status-text">{progressMsg}</p>
-            </div>
-          )}
+      <div className="tracking-shell">
+        <div className="tracking-map">
+          <div id="tracking-map" />
 
-          {status === 'failed' && (
-            <div className="failed-block">
-              <p className="status-text">Could not load job details</p>
-              <p className="status-small">Please check your connection and try again</p>
-              <div className="actions">
-                <Button onClick={handleRetry}>Retry</Button>
-                <Button onClick={() => window.location.href = '/dashboard'} variant="outline">Go to Dashboard</Button>
-              </div>
-            </div>
-          )}
-
-          {['matched', 'accepted'].includes(status) && fundi && (
-            <div className="found-block">
-              <p className="status-small">{status === 'matched' ? 'Fundi matched — awaiting their response' : 'Fundi accepted your request'}</p>
-              <div className="fundi-card slide-up">
-                <img 
-                  src={fundi.avatarUrl} 
-                  alt={fundi.name} 
-                  className="avatar"
-                  onError={(e) => { (e.target as HTMLImageElement).src = '/assets/default-avatar.png'; }}
-                />
-                <div className="meta">
-                  <div className="name">{fundi.name}</div>
-                  <div className="skill">{fundi.skill}</div>
-                  <div className="details">{fundi.distanceKm ? `${fundi.distanceKm} km` : ''} • {fundi.rating} ★</div>
+          <div className="tracking-overlay">
+            <div className="tracking-topbar">
+              <div className="top-chip">
+                <div className="dot" />
+                <div className="label">
+                  {status === 'searching' && 'Finding a Fundi'}
+                  {status === 'matched' && 'Fundi Matched'}
+                  {status === 'accepted' && 'Fundi Accepted'}
+                  {status === 'on_the_way' && 'On the Way'}
+                  {status === 'arrived' && 'Arrived'}
+                  {status === 'in_progress' && 'In Progress'}
+                  {status === 'completed' && 'Completed'}
+                  {status === 'cancelled' && 'Cancelled'}
+                  {status === 'failed' && 'Connection Issue'}
                 </div>
               </div>
-              <div className="actions large-actions large-actions-top">
-                <a href={`tel:+254700000000`} className="action-btn call" aria-label="Call Fundi">
-                  <Phone size={20} />
-                  <span>Call</span>
-                </a>
-                <button className="action-btn message" onClick={() => alert('Chat feature coming soon')}>
-                  <MessageCircle size={20} />
-                  <span>Message</span>
+
+              <div className="top-actions">
+                {status === 'searching' && (
+                  <button
+                    className="icon-btn"
+                    aria-label="Cancel job"
+                    onClick={async () => {
+                      try {
+                        await apiClient.cancelJob(jobId!, 'Customer cancelled while searching');
+                        setJobStatusRaw('cancelled');
+                        toast.success('Job cancelled');
+                      } catch (e: any) {
+                        toast.error(e?.message || 'Failed to cancel job');
+                      }
+                    }}
+                  >
+                    <X size={18} />
+                  </button>
+                )}
+                <button
+                  className="icon-btn"
+                  aria-label="Center map"
+                  onClick={() => {
+                    if (!mapRef.current) return;
+                    const lat = customerLocation?.latitude || -1.286389;
+                    const lng = customerLocation?.longitude || 36.817223;
+                    mapRef.current.setView([lat, lng], 15, { animate: true });
+                    try { mapRef.current.invalidateSize(true); } catch (e) {}
+                  }}
+                >
+                  <Navigation size={18} />
                 </button>
               </div>
             </div>
-          )}
+          </div>
+        </div>
 
-          {['on_the_way','in_progress'].includes(status) && fundi && (
-            <div className="live-block">
-              <p className="status-small">{status === 'on_the_way' ? 'Fundi is on the way' : 'Job in progress'}</p>
-              <div id="tracking-map" className="map-placeholder"></div>
-              <div className="eta-row">
-                <div className="eta">ETA: {eta ? `${eta} min` : 'Calculating...'}</div>
-                <div className="status-pill">{status.replace(/_/g, ' ').toUpperCase()}</div>
-              </div>
-              <div className="actions large-actions">
-                <a href={`tel:+254700000000`} className="action-btn call" aria-label="Call Fundi">
-                  <Phone size={20} />
-                  <span>Call</span>
-                </a>
-                <button className="action-btn message" onClick={() => alert('Chat feature coming soon')}>
-                  <MessageCircle size={20} />
-                  <span>Message</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {status === 'completed' && (
-            <div className="complete-block">
-              <p className="status-text">Completed — thank you!</p>
-              <div className="actions">
-                <Button onClick={() => onComplete?.()}>Done</Button>
-              </div>
-            </div>
-          )}
+        <div className="tracking-panel">
+          <div className="bottom-sheet">
+            <div className="sheet-handle" />
+            {panelContent}
+          </div>
         </div>
       </div>
     </div>

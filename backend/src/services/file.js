@@ -21,6 +21,14 @@ if (!fs.existsSync(fundisDir)) {
 // File storage configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
+    // If uploads were cleaned while the server is running, recreate the directory on demand.
+    try {
+      if (!fs.existsSync(fundisDir)) {
+        fs.mkdirSync(fundisDir, { recursive: true });
+      }
+    } catch (err) {
+      return cb(err);
+    }
     // Store in /uploads/fundis/ directory
     cb(null, fundisDir);
   },

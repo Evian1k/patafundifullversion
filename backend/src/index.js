@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './env.js';
 import express from 'express';
 import http from 'http';
 import { Server as IOServer } from 'socket.io';
@@ -14,6 +14,8 @@ import fundiRegistrationRoutes from './routes/fundi-registration.js';
 import jobRoutes from './routes/jobs.js';
 import uploadRoutes from './routes/upload.js';
 import paymentRoutes from './routes/payments.js';
+import subscriptionRoutes from './routes/subscriptions.js';
+import userRoutes from './routes/users.js';
 
 // Middleware
 import { errorHandler } from './middlewares/errorHandler.js';
@@ -52,7 +54,10 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/fundi/registration', fundiRegistrationRoutes);
 app.use('/api/fundi', fundiRoutes);
 app.use('/api/jobs', authMiddleware, jobRoutes);
-app.use('/api/payments', authMiddleware, paymentRoutes);
+// payments router protects endpoints internally; callback must be unauthenticated
+app.use('/api/payments', paymentRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
+app.use('/api/users', userRoutes);
 app.use('/api/upload', authMiddleware, uploadRoutes);
 
 // Error handling
@@ -61,7 +66,7 @@ app.use(errorHandler);
 // Attach socket.io
 const io = new IOServer(server, {
   cors: {
-    origin: ['http://localhost:5173', 'http://localhost:8080'],
+    origin: ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
     methods: ['GET', 'POST']
   }
 });
@@ -69,6 +74,10 @@ const io = new IOServer(server, {
 // initialize realtime handlers lazily to avoid circular imports
 import initRealtime from './services/realtime.js';
 initRealtime(io);
+
+// Dev convenience: ensure the configured admin account exists after DB clean/reset.
+import { bootstrapAdmin } from './services/adminBootstrap.js';
+bootstrapAdmin().catch((err) => console.error('Admin bootstrap failed:', err.message));
 
 server.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);

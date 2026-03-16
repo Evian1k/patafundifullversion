@@ -1,4 +1,7 @@
 export const SCHEMA = `
+-- Required for gen_random_uuid()
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 -- Users table
 CREATE TABLE IF NOT EXISTS users (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -7,6 +10,12 @@ CREATE TABLE IF NOT EXISTS users (
   full_name VARCHAR(255),
   phone VARCHAR(20),
   role VARCHAR(50) DEFAULT 'customer',
+  status VARCHAR(50) DEFAULT 'active',
+  disabled_at TIMESTAMP,
+  email_verified BOOLEAN DEFAULT false,
+  phone_verified BOOLEAN DEFAULT false,
+  -- Fundi onboarding gate: admin approval sends OTP, then fundi verifies OTP to access fundi dashboard/features
+  fundi_otp_verified BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -72,6 +81,8 @@ CREATE TABLE IF NOT EXISTS jobs (
   estimated_price DECIMAL(10, 2),
   final_price DECIMAL(10, 2),
   platform_fee DECIMAL(10, 2),
+  customer_completion_confirmed BOOLEAN DEFAULT false,
+  customer_completion_confirmed_at TIMESTAMP,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -156,6 +167,87 @@ CREATE TABLE IF NOT EXISTS payments (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- M-Pesa STK transaction tracking
+CREATE TABLE IF NOT EXISTS mpesa_transactions (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payment_id UUID REFERENCES payments(id) ON DELETE CASCADE,
+  job_id UUID REFERENCES jobs(id) ON DELETE CASCADE,
+  kind VARCHAR(50) DEFAULT 'job', -- job, subscription
+  fundi_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  subscription_payment_id UUID,
+  plan VARCHAR(50),
+  phone_number VARCHAR(30),
+  amount DECIMAL(10,2),
+  merchant_request_id VARCHAR(128),
+  checkout_request_id VARCHAR(128),
+  result_code INTEGER,
+  result_desc TEXT,
+  receipt_number VARCHAR(64),
+  status VARCHAR(50) DEFAULT 'initiated',
+  raw JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_mpesa_transactions_checkout ON mpesa_transactions(checkout_request_id);
+CREATE INDEX IF NOT EXISTS idx_mpesa_transactions_payment ON mpesa_transactions(payment_id);
+CREATE INDEX IF NOT EXISTS idx_mpesa_transactions_kind ON mpesa_transactions(kind);
+
+-- Fundi subscription payments (initiations + receipts)
+CREATE TABLE IF NOT EXISTS subscription_payments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  fundi_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  plan VARCHAR(50) NOT NULL,
+  amount DECIMAL(10,2) NOT NULL,
+  payment_status VARCHAR(50) DEFAULT 'pending',
+  transaction_id VARCHAR(255),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_subscription_payments_fundi ON subscription_payments(fundi_id, created_at DESC);
+
+-- Job status history (audit trail for job lifecycle)
+CREATE TABLE IF NOT EXISTS job_status_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id UUID NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+  old_status VARCHAR(50),
+  new_status VARCHAR(50) NOT NULL,
+  actor_id UUID REFERENCES users(id),
+  actor_role VARCHAR(50),
+  notes TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_job_status_history_job ON job_status_history(job_id);
+CREATE INDEX IF NOT EXISTS idx_job_status_history_created ON job_status_history(created_at DESC);
+
+-- Location history (for compliance/anomaly checks and playback)
+CREATE TABLE IF NOT EXISTS location_history (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  job_id UUID REFERENCES jobs(id) ON DELETE SET NULL,
+  latitude DECIMAL(10,8),
+  longitude DECIMAL(11,8),
+  accuracy INTEGER,
+  source VARCHAR(50) DEFAULT 'api', -- api, socket, background
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_location_history_user ON location_history(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_location_history_job ON location_history(job_id, created_at DESC);
+
+-- General audit logs (all roles/actions)
+CREATE TABLE IF NOT EXISTS audit_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  actor_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  actor_role VARCHAR(50),
+  action VARCHAR(100) NOT NULL,
+  entity_type VARCHAR(100),
+  entity_id UUID,
+  metadata JSONB,
+  ip_address VARCHAR(64),
+  user_agent TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_actor ON audit_logs(actor_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_entity ON audit_logs(entity_type, entity_id);
+
 -- Admin action logs table
 CREATE TABLE IF NOT EXISTS admin_action_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -179,6 +271,22 @@ CREATE TABLE IF NOT EXISTS password_resets (
   used BOOLEAN DEFAULT false,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- OTP codes (email/phone verification, job confirmation, etc.)
+CREATE TABLE IF NOT EXISTS otp_codes (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+  destination VARCHAR(255) NOT NULL, -- email or phone
+  channel VARCHAR(20) NOT NULL, -- email, sms
+  purpose VARCHAR(50) NOT NULL, -- register, login, job_complete, etc.
+  code_hash VARCHAR(255) NOT NULL,
+  attempts INTEGER DEFAULT 0,
+  used BOOLEAN DEFAULT false,
+  expires_at TIMESTAMP NOT NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_otp_codes_user_purpose ON otp_codes(user_id, purpose, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_otp_codes_destination ON otp_codes(destination, created_at DESC);
 
 -- Create indexes for performance
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);

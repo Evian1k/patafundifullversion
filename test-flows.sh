@@ -8,6 +8,10 @@ NC='\033[0m' # No Color
 
 API="http://localhost:5000/api"
 ADMIN_EMAIL="emmanuelevian@gmail.com"
+ADMIN_PASSWORD="emmanuelevian12k@Q"
+RUN_ID=$(date +%s)
+CUSTOMER_EMAIL="customer+$RUN_ID@test.com"
+FUNDI_EMAIL="fundi+$RUN_ID@test.com"
 
 echo -e "${YELLOW}=== FixIt Connect E2E Tests ===${NC}\n"
 
@@ -15,7 +19,7 @@ echo -e "${YELLOW}=== FixIt Connect E2E Tests ===${NC}\n"
 echo -e "${YELLOW}[1/8] Customer Signup...${NC}"
 CUSTOMER=$(curl -s -X POST $API/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"customer@test.com","password":"Password123","fullName":"Test Customer"}')
+  -d "{\"email\":\"$CUSTOMER_EMAIL\",\"password\":\"Password123\",\"fullName\":\"Test Customer\"}")
 CUSTOMER_ID=$(echo $CUSTOMER | jq -r '.user.id')
 CUSTOMER_TOKEN=$(echo $CUSTOMER | jq -r '.token')
 CUSTOMER_ROLE=$(echo $CUSTOMER | jq -r '.user.role')
@@ -30,7 +34,7 @@ fi
 echo -e "\n${YELLOW}[2/8] Fundi Signup...${NC}"
 FUNDI=$(curl -s -X POST $API/auth/signup \
   -H "Content-Type: application/json" \
-  -d '{"email":"fundi@test.com","password":"Password123","fullName":"Test Fundi"}')
+  -d "{\"email\":\"$FUNDI_EMAIL\",\"password\":\"Password123\",\"fullName\":\"Test Fundi\"}")
 FUNDI_ID=$(echo $FUNDI | jq -r '.user.id')
 FUNDI_TOKEN=$(echo $FUNDI | jq -r '.token')
 FUNDI_ROLE=$(echo $FUNDI | jq -r '.user.role')
@@ -60,7 +64,7 @@ ONLINE_FAIL=$(curl -s -X POST $API/fundi/status/online \
   -d '{"latitude":-1.2921,"longitude":36.8219,"accuracy":15}')
 ONLINE_ERR=$(echo $ONLINE_FAIL | jq -r '.message // .success')
 
-if [[ "$ONLINE_ERR" == *"not yet approved"* ]] || [[ "$ONLINE_ERR" == "false" ]]; then
+if [[ "$ONLINE_ERR" == *"Required roles"* ]] || [[ "$ONLINE_ERR" == *"not yet approved"* ]] || [[ "$ONLINE_ERR" == "false" ]]; then
   echo -e "${GREEN}✓ Unverified fundi blocked from going online${NC}"
 else
   echo -e "${RED}✗ Unverified fundi should not go online: $ONLINE_ERR${NC}"
@@ -105,7 +109,7 @@ fi
 echo -e "\n${YELLOW}[7/8] Admin Login...${NC}"
 ADMIN=$(curl -s -X POST $API/auth/login \
   -H "Content-Type: application/json" \
-  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"password123\"}")
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
 ADMIN_ROLE=$(echo $ADMIN | jq -r '.user.role // "error"')
 
 if [ "$ADMIN_ROLE" == "admin" ]; then

@@ -61,13 +61,26 @@ export const optionalAuth = (req, res, next) => {
  * @param {...string} allowedRoles - List of roles that can access the route
  */
 export const requireRole = (...allowedRoles) => {
-  return (req, res, next) => {
+  return async (req, res, next) => {
     try {
       if (!req.user) {
         throw new AppError('Authentication required', 401);
       }
 
-      if (!allowedRoles.includes(req.user.role)) {
+      // Trust DB role over JWT role claim (role can change after admin approval).
+      const r = await query('SELECT role, status FROM users WHERE id = $1', [req.user.userId]);
+      if (r.rows.length === 0) throw new AppError('User not found', 401);
+      const dbRole = r.rows[0].role;
+      const dbStatus = r.rows[0].status;
+
+      if (dbStatus && dbStatus !== 'active') {
+        throw new AppError('Account is not active', 403);
+      }
+
+      // Keep req.user.role up to date for downstream handlers/audit logs
+      req.user.role = dbRole;
+
+      if (!allowedRoles.includes(dbRole)) {
         throw new AppError(`Access denied. Required roles: ${allowedRoles.join(', ')}`, 403);
       }
 
@@ -76,6 +89,59 @@ export const requireRole = (...allowedRoles) => {
       res.status(error.statusCode || 403).json({
         success: false,
         message: error.message
+      });
+    }
+  };
+};
+
+/**
+ * Fundi access guard: user must be an approved fundi and must have verified the fundi-approval OTP.
+ * Used for fundi dashboard + job-taking features.
+ */
+export const requireFundiAccess = () => {
+  return async (req, res, next) => {
+    try {
+      if (!req.user) throw new AppError('Authentication required', 401);
+
+      const userRes = await query(
+        'SELECT role, status, fundi_otp_verified FROM users WHERE id = $1',
+        [req.user.userId]
+      );
+      if (userRes.rows.length === 0) throw new AppError('User not found', 401);
+
+      const u = userRes.rows[0];
+      req.user.role = u.role;
+
+      if (u.status && u.status !== 'active') throw new AppError('Account is not active', 403);
+
+      // Must be promoted to fundi by admin
+      if (u.role !== 'fundi') {
+        throw new AppError('Fundi access denied. Account is not approved yet.', 403);
+      }
+
+      // Must have approved profile
+      const profRes = await query(
+        `SELECT verification_status FROM fundi_profiles WHERE user_id = $1`,
+        [req.user.userId]
+      );
+      const verificationStatus = profRes.rows[0]?.verification_status || null;
+      if (verificationStatus !== 'approved') {
+        throw new AppError('Fundi access denied. Verification not approved.', 403);
+      }
+
+      if (u.fundi_otp_verified !== true) {
+        const err = new AppError('OTP required. Please verify the code sent after approval.', 403);
+        // Attach a small machine-readable hint for the frontend.
+        err.meta = { code: 'FUNDI_OTP_REQUIRED' };
+        throw err;
+      }
+
+      next();
+    } catch (error) {
+      res.status(error.statusCode || 403).json({
+        success: false,
+        message: error.message,
+        ...(error.meta ? { meta: error.meta } : {}),
       });
     }
   };

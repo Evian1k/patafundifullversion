@@ -5,6 +5,9 @@ import { authMiddleware, adminOnly } from '../middlewares/auth.js';
 import { logAdminAction, getAdminActionLogs } from '../services/adminLogger.js';
 import { getFileUrl } from '../services/file.js';
 import { sendMail } from '../services/mailer.js';
+import { generateOtpCode, hashOtp } from '../services/otp.js';
+import { addMinutes } from '../utils/time.js';
+import { otpEmail } from '../services/emailTemplates.js';
 
 const router = express.Router();
 
@@ -101,6 +104,74 @@ router.get('/dashboard-stats', authMiddleware, adminOnly, async (req, res, next)
  */
 router.get('/pending-fundis', authMiddleware, adminOnly, async (req, res, next) => {
   try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT fp.*, u.email, u.phone
+       FROM fundi_profiles fp
+       JOIN users u ON fp.user_id = u.id
+       WHERE fp.verification_status = 'pending'
+       ORDER BY fp.created_at ASC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countResult = await query(
+      'SELECT COUNT(*) as count FROM fundi_profiles WHERE verification_status = $1',
+      ['pending']
+    );
+    const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
+
+    res.json({
+      success: true,
+      fundis: result.rows.map(fundi => ({
+        id: fundi.id,
+        userId: fundi.user_id,
+        firstName: fundi.first_name,
+        lastName: fundi.last_name,
+        email: fundi.email,
+        phone: fundi.phone,
+        idNumber: fundi.id_number,
+        idNumberExtracted: fundi.id_number_extracted,
+        idNameExtracted: fundi.id_name_extracted,
+        idPhotoUrl: getFileUrl(fundi.id_photo_path),
+        idPhotoBackUrl: getFileUrl(fundi.id_photo_back_path),
+        selfieUrl: getFileUrl(fundi.selfie_path),
+        certificateUrls: fundi.certificate_paths?.map(p => getFileUrl(p)) || [],
+        latitude: fundi.latitude,
+        longitude: fundi.longitude,
+        accuracy: fundi.accuracy,
+        locationAddress: fundi.location_address,
+        locationArea: fundi.location_area,
+        locationCity: fundi.location_city,
+        skills: fundi.skills,
+        experienceYears: fundi.experience_years,
+        mpesaNumber: fundi.mpesa_number,
+        verificationStatus: fundi.verification_status,
+        verificationNotes: fundi.verification_notes,
+        createdAt: fundi.created_at,
+        updatedAt: fundi.updated_at
+      })),
+      pagination: {
+        page,
+        limit,
+        total: totalCount,
+        pages: Math.ceil(totalCount / limit)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Alias: Get pending fundi verifications (admin only)
+ */
+router.get('/fundis/pending', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    // Same behavior as /pending-fundis
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
@@ -390,20 +461,8 @@ router.post('/fundis/:fundiId/approve', authMiddleware, adminOnly, async (req, r
     );
 
     // Fetch the user's email to notify
-    const userResult = await query('SELECT email FROM users WHERE id = $1', [fundi.user_id]);
+    const userResult = await query('SELECT id, email FROM users WHERE id = $1', [fundi.user_id]);
     const userEmail = userResult.rows.length > 0 ? userResult.rows[0].email : null;
-
-    // Send notification email to fundi if available
-    if (userEmail) {
-      const subject = 'Your FixIt Connect verification is approved';
-      const text = `Hi ${fundi.first_name || ''},\n\nYour verification has been approved. You can now accept jobs on FixIt Connect.\n\nRegards,\nFixIt Connect Team`;
-      const html = `<p>Hi ${fundi.first_name || ''},</p><p>Your verification has been <strong>approved</strong>. You can now accept jobs on FixIt Connect.</p><p>Regards,<br/>FixIt Connect Team</p>`;
-      try {
-        await sendMail(userEmail, subject, text, html);
-      } catch (err) {
-        console.error('Failed to send approval email to', userEmail, err.message);
-      }
-    }
 
     // Promote the user role to 'fundi' so they receive fundi dashboard and can be matched
     try {
@@ -417,6 +476,42 @@ router.post('/fundis/:fundiId/approve', authMiddleware, adminOnly, async (req, r
       console.error('Failed to set user role to fundi for fundi id', fundiId, err.message);
     }
 
+    // Send OTP for fundi access (after approval)
+    let otpInfo = null;
+    const echoOtp = process.env.DEV_ECHO_OTP === 'true' && process.env.NODE_ENV !== 'production';
+    let debugOtp = null;
+    if (userEmail) {
+      try {
+        const code = generateOtpCode();
+        const expiresAt = addMinutes(new Date(), 10);
+        const codeHash = hashOtp(code, userEmail, 'fundi_approval');
+
+        await query(
+          `INSERT INTO otp_codes (user_id, destination, channel, purpose, code_hash, expires_at)
+           VALUES ($1, $2, 'email', $3, $4, $5)`,
+          [fundi.user_id, userEmail, 'fundi_approval', codeHash, expiresAt]
+        );
+
+        await query(
+          `UPDATE users SET fundi_otp_verified = false, updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
+          [fundi.user_id]
+        ).catch(() => {});
+
+        const tpl = otpEmail({
+          code,
+          purpose: 'fundi_approval',
+          toEmail: userEmail,
+          name: fundi.first_name || '',
+        });
+        await sendMail(userEmail, tpl.subject, tpl.text, tpl.html);
+
+        otpInfo = { destination: userEmail, channel: 'email', expiresAt: expiresAt.toISOString() };
+        if (echoOtp) debugOtp = { code };
+      } catch (err) {
+        console.error('Failed to send fundi approval OTP to', userEmail, err.message);
+      }
+    }
+
     res.json({
       success: true,
       message: 'Fundi approved successfully',
@@ -426,7 +521,9 @@ router.post('/fundis/:fundiId/approve', authMiddleware, adminOnly, async (req, r
         lastName: fundi.last_name,
         verificationStatus: fundi.verification_status,
         verificationNotes: fundi.verification_notes
-      }
+      },
+      otp: otpInfo,
+      ...(debugOtp ? { debug: { otp: debugOtp } } : {}),
     });
   } catch (error) {
     next(error);
@@ -636,9 +733,9 @@ router.get('/action-logs', authMiddleware, adminOnly, async (req, res, next) => 
         actionType: log.action_type,
         targetType: log.target_type,
         targetId: log.target_id,
-        previousData: log.previous_data,
-        newData: log.new_data,
-        notes: log.notes,
+        previousData: log.old_value ? JSON.parse(log.old_value) : null,
+        newData: log.new_value ? JSON.parse(log.new_value) : null,
+        reason: log.reason,
         ipAddress: log.ip_address,
         createdAt: log.created_at
       })),
@@ -723,23 +820,33 @@ router.get('/customers', authMiddleware, adminOnly, async (req, res, next) => {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const offset = (page - 1) * limit;
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+
+    const params = [limit, offset];
+    // Customers are users with role=customer AND no fundi application/profile.
+    // This prevents fundi applicants from appearing under customers even if their role was not updated due to older builds.
+    let where = `u.role = 'customer' AND NOT EXISTS (SELECT 1 FROM fundi_profiles fp WHERE fp.user_id = u.id)`;
+    if (q) {
+      where += ` AND (u.email ILIKE $3 OR u.full_name ILIKE $3 OR u.phone ILIKE $3)`;
+      params.push(`%${q}%`);
+    }
 
     const result = await query(
-      `SELECT u.id, u.email, u.full_name, u.phone, u.created_at,
+      `SELECT u.id, u.email, u.full_name, u.phone, u.status, u.email_verified, u.created_at,
               COUNT(DISTINCT j.id) as job_count
        FROM users u
        LEFT JOIN jobs j ON u.id = j.customer_id
-       WHERE u.role = 'customer'
+       WHERE ${where}
        GROUP BY u.id
        ORDER BY u.created_at DESC
        LIMIT $1 OFFSET $2`,
-      [limit, offset]
+      params
     );
 
-    const countResult = await query(
-      'SELECT COUNT(*) as count FROM users WHERE role = $1',
-      ['customer']
-    );
+    const countParams = [];
+    let countSql = `SELECT COUNT(*) as count FROM users u WHERE ${where}`;
+    if (q) countParams.push(`%${q}%`);
+    const countResult = await query(countSql, countParams);
     const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
 
     res.json({
@@ -747,9 +854,11 @@ router.get('/customers', authMiddleware, adminOnly, async (req, res, next) => {
       customers: result.rows.map(customer => ({
         id: customer.id,
         email: customer.email,
-        fullName: customer.full_name,
-        phone: customer.phone,
+        fullName: customer.full_name || null,
+        phone: customer.phone || null,
         jobCount: parseInt(customer.job_count) || 0,
+        status: customer.status || null,
+        emailVerified: customer.email_verified === true,
         createdAt: customer.created_at
       })),
       pagination: {
@@ -852,7 +961,7 @@ router.get('/transactions', authMiddleware, adminOnly, async (req, res, next) =>
               uc.full_name as customer_name,
               uf.full_name as fundi_name,
               j.final_price as amount,
-              ROUND(j.final_price * 0.1) as commission,
+              j.platform_fee as commission,
               j.status,
               j.updated_at as created_at
        FROM jobs j
@@ -870,7 +979,8 @@ router.get('/transactions', authMiddleware, adminOnly, async (req, res, next) =>
     );
     const totalCount = countResult.rows && countResult.rows[0] ? parseInt(countResult.rows[0].count) : 0;
     const totalRevenue = parseFloat(countResult.rows[0].total_revenue) || 0;
-    const totalCommission = totalRevenue * 0.1;
+    const commissionSum = await query(`SELECT COALESCE(SUM(platform_fee),0) as total_commission FROM jobs WHERE status = $1`, ['completed']);
+    const totalCommission = parseFloat(commissionSum.rows[0]?.total_commission) || 0;
 
     res.json({
       success: true,
@@ -902,6 +1012,84 @@ router.get('/transactions', authMiddleware, adminOnly, async (req, res, next) =>
 });
 
 /**
+ * Payments logs (admin only) - API contract alias
+ */
+router.get('/payments/logs', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT p.*,
+              jc.title as job_title,
+              uc.full_name as customer_name,
+              uf.full_name as fundi_name
+       FROM payments p
+       LEFT JOIN jobs jc ON jc.id = p.job_id
+       LEFT JOIN users uc ON uc.id = p.customer_id
+       LEFT JOIN users uf ON uf.id = p.fundi_id
+       ORDER BY p.created_at DESC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countRes = await query('SELECT COUNT(*) as count FROM payments');
+    const total = parseInt(countRes.rows[0]?.count || 0);
+
+    res.json({
+      success: true,
+      payments: result.rows.map(p => ({
+        id: p.id,
+        jobId: p.job_id,
+        jobTitle: p.job_title,
+        customerId: p.customer_id,
+        customerName: p.customer_name,
+        fundiId: p.fundi_id,
+        fundiName: p.fundi_name,
+        amount: parseFloat(p.amount),
+        platformFee: parseFloat(p.platform_fee),
+        fundiEarnings: parseFloat(p.fundi_earnings),
+        paymentMethod: p.payment_method,
+        status: p.payment_status,
+        transactionId: p.transaction_id,
+        createdAt: p.created_at,
+      })),
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Audit logs (admin only)
+ */
+router.get('/audit/logs', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 50;
+    const offset = (page - 1) * limit;
+
+    const result = await query(
+      `SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2`,
+      [limit, offset]
+    );
+
+    const countRes = await query('SELECT COUNT(*) as count FROM audit_logs');
+    const total = parseInt(countRes.rows[0]?.count || 0);
+
+    res.json({
+      success: true,
+      logs: result.rows,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * Get security alerts (admin only)
  */
 router.get('/security-alerts', authMiddleware, adminOnly, async (req, res, next) => {
@@ -922,7 +1110,7 @@ router.get('/security-alerts', authMiddleware, adminOnly, async (req, res, next)
 router.post('/security-alerts/:alertId/resolve', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     await logAdminAction(
-      req.user.id,
+      req.user.userId,
       'resolve_alert',
       'security_alert',
       req.params.alertId,
@@ -952,7 +1140,7 @@ router.post('/users/:userId/force-logout', authMiddleware, adminOnly, async (req
     // In production, implement proper session management
 
     await logAdminAction(
-      req.user.id,
+      req.user.userId,
       'force_logout',
       'user',
       userId,
@@ -985,7 +1173,7 @@ router.post('/users/:userId/disable', authMiddleware, adminOnly, async (req, res
     );
 
     await logAdminAction(
-      req.user.id,
+      req.user.userId,
       'disable_account',
       'user',
       userId,
@@ -1033,7 +1221,7 @@ router.put('/settings', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     // In production, store settings in database
     await logAdminAction(
-      req.user.id,
+      req.user.userId,
       'update_settings',
       'admin_settings',
       'platform',
@@ -1116,4 +1304,3 @@ router.get('/reports', authMiddleware, adminOnly, async (req, res, next) => {
 });
 
 export default router;
-

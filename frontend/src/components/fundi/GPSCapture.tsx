@@ -7,6 +7,7 @@ import { motion } from 'framer-motion';
 import { MapPin, AlertCircle, Loader } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
+import { getMaxGpsAccuracyMeters } from '@/lib/gps';
 
 interface GPSData {
   latitude: number;
@@ -26,6 +27,7 @@ export function GPSCapture({ onCapture, onError }: GPSCaptureProps) {
   const [loading, setLoading] = useState(false);
   const [mapUrl, setMapUrl] = useState<string | null>(null);
   const [accuracy, setAccuracy] = useState<number | null>(null);
+  const maxAccuracyMeters = getMaxGpsAccuracyMeters();
 
   useEffect(() => {
     if (gpsData) {
@@ -63,8 +65,10 @@ export function GPSCapture({ onCapture, onError }: GPSCaptureProps) {
       setAccuracy(Math.round(acc));
 
       // Check accuracy threshold
-      if (Math.round(acc) > 150) {
-        toast.warning(`GPS accuracy is ${Math.round(acc)}m. Move to an open area for better accuracy.`);
+      if (Math.round(acc) > maxAccuracyMeters) {
+        toast.warning(
+          `GPS accuracy is ${Math.round(acc)}m (target ≤ ${Math.round(maxAccuracyMeters)}m). Move to an open area for better accuracy.`
+        );
         setGpsData(data);
         return;
       }
@@ -87,8 +91,10 @@ export function GPSCapture({ onCapture, onError }: GPSCaptureProps) {
   const handleConfirm = () => {
     if (!gpsData) return;
 
-    if (gpsData.accuracy > 150) {
-      toast.error('GPS accuracy too poor. Please recapture in an open area.');
+    if (gpsData.accuracy > maxAccuracyMeters) {
+      toast.error(
+        `GPS accuracy is too poor (${gpsData.accuracy}m > ${Math.round(maxAccuracyMeters)}m). Please recapture in an open area.`
+      );
       return;
     }
 
@@ -149,18 +155,22 @@ export function GPSCapture({ onCapture, onError }: GPSCaptureProps) {
           {/* Accuracy Status */}
           <div
             className={`p-3 rounded-lg ${
-              accuracy && accuracy <= 150
+              accuracy && accuracy <= maxAccuracyMeters
                 ? 'bg-green-50 border border-green-200'
                 : 'bg-yellow-50 border border-yellow-200'
             }`}
           >
-            <p className={`text-sm font-semibold ${accuracy && accuracy <= 150 ? 'text-green-800' : 'text-yellow-800'}`}>
+            <p
+              className={`text-sm font-semibold ${
+                accuracy && accuracy <= maxAccuracyMeters ? 'text-green-800' : 'text-yellow-800'
+              }`}
+            >
               Accuracy: ±{accuracy}m
             </p>
-            {accuracy && accuracy <= 150 && (
+            {accuracy && accuracy <= maxAccuracyMeters && (
               <p className="text-xs text-green-700 mt-1">✓ Accuracy is acceptable</p>
             )}
-            {accuracy && accuracy > 150 && (
+            {accuracy && accuracy > maxAccuracyMeters && (
               <p className="text-xs text-yellow-700 mt-1">
                 ⚠ Move to an open area for better accuracy
               </p>
@@ -198,7 +208,7 @@ export function GPSCapture({ onCapture, onError }: GPSCaptureProps) {
             </Button>
             <Button
               onClick={handleConfirm}
-              disabled={accuracy ? accuracy > 150 : false}
+              disabled={accuracy ? accuracy > maxAccuracyMeters : false}
               className="flex-1 bg-green-600 hover:bg-green-700"
             >
               Confirm

@@ -5,11 +5,107 @@ import { query, getClient } from '../db.js';
 import { upload, getFileUrl } from '../services/file.js';
 import { verifyOCRData } from '../services/ocr.js';
 import { AppError } from '../utils/errors.js';
-import { authMiddleware, requireRole } from '../middlewares/auth.js';
+import { authMiddleware, requireRole, requireFundiAccess, adminOnly } from '../middlewares/auth.js';
 import { sendMail } from '../services/mailer.js';
+import { adminNewFundiSubmissionEmail } from '../services/emailTemplates.js';
 import fs from 'fs';
+import { mpesaIsConfigured, mpesaStkPush } from '../services/mpesa.js';
 
 const router = express.Router();
+
+/**
+ * Get available job requests for fundi (sent, not expired)
+ */
+router.get('/jobs/available', authMiddleware, requireFundiAccess(), async (req, res, next) => {
+  try {
+    const userId = req.user.userId;
+    const result = await query(
+      `SELECT jr.job_id, jr.expires_at, jr.created_at,
+              j.title, j.description, j.category, j.location, j.latitude, j.longitude, j.estimated_price, j.status
+       FROM job_requests jr
+       JOIN jobs j ON j.id = jr.job_id
+       WHERE jr.fundi_id = $1
+         AND jr.status = 'sent'
+         AND jr.expires_at > NOW()
+       ORDER BY jr.created_at DESC
+       LIMIT 50`,
+      [userId]
+    );
+
+    res.json({
+      success: true,
+      requests: result.rows.map(r => ({
+        jobId: r.job_id,
+        status: r.status,
+        title: r.title,
+        description: r.description,
+        category: r.category,
+        location: r.location,
+        latitude: r.latitude,
+        longitude: r.longitude,
+        estimatedPrice: r.estimated_price,
+        expiresAt: r.expires_at,
+        createdAt: r.created_at,
+      })),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Fundi approval / OTP gating status for UI routing.
+ */
+router.get('/approval-status', authMiddleware, async (req, res, next) => {
+  try {
+    const userId = req.user.userId;
+    const userRes = await query(
+      `SELECT id, email, role, fundi_otp_verified
+       FROM users
+       WHERE id = $1`,
+      [userId]
+    );
+    if (userRes.rows.length === 0) throw new AppError('User not found', 404);
+
+    const u = userRes.rows[0];
+    const profRes = await query(
+      `SELECT id, verification_status, verification_notes, created_at, updated_at
+       FROM fundi_profiles
+       WHERE user_id = $1`,
+      [userId]
+    );
+
+    const profile = profRes.rows[0] || null;
+    const verificationStatus = profile?.verification_status || null;
+
+    res.json({
+      success: true,
+      user: {
+        id: u.id,
+        email: u.email,
+        role: u.role,
+        fundiOtpVerified: u.fundi_otp_verified === true,
+      },
+      fundi: profile
+        ? {
+            id: profile.id,
+            verificationStatus,
+            verificationNotes: profile.verification_notes || null,
+            createdAt: profile.created_at,
+            updatedAt: profile.updated_at,
+          }
+        : null,
+      gates: {
+        isFundi: u.role === 'fundi',
+        isFundiPending: u.role === 'fundi_pending',
+        isApproved: verificationStatus === 'approved',
+        otpRequired: u.role === 'fundi' && verificationStatus === 'approved' && u.fundi_otp_verified !== true,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * Submit fundi registration
@@ -38,8 +134,16 @@ router.post('/register', authMiddleware, upload.fields([
       throw new AppError('Missing required personal information', 400);
     }
 
-    if (!latitude || !longitude) {
+    if (typeof latitude === 'undefined' || typeof longitude === 'undefined') {
       throw new AppError('GPS coordinates are required', 400);
+    }
+    const lat = parseFloat(latitude);
+    const lng = parseFloat(longitude);
+    if (Number.isNaN(lat) || Number.isNaN(lng)) {
+      throw new AppError('Invalid GPS coordinates', 400);
+    }
+    if (lat < -90 || lat > 90 || lng < -180 || lng > 180) {
+      throw new AppError('GPS coordinates out of range', 400);
     }
 
     if (!req.files?.idPhoto || !req.files?.selfie) {
@@ -78,15 +182,34 @@ router.post('/register', authMiddleware, upload.fields([
     if (ocrResult.extractedId) idNumberExtracted = ocrResult.extractedId;
     if (ocrResult.extractedName) idNameExtracted = ocrResult.extractedName;
 
-    // Reject if OCR clearly mismatches beyond tolerance
-    if (!ocrResult.idValid || !ocrResult.nameValid) {
+    // OCR decision
+    const ocrMismatch = !ocrResult.idValid || !ocrResult.nameValid;
+    const isProd = process.env.NODE_ENV === 'production';
+    const ocrBypass = process.env.OCR_BYPASS === 'true' && !isProd;
+    const ocrSoftFail = process.env.OCR_SOFT_FAIL === 'true' && !isProd;
+
+    // In production, OCR mismatch is a hard failure unless the operator explicitly bypasses (not recommended).
+    if (ocrMismatch && isProd && !ocrBypass) {
       throw new AppError('OCR verification failed: extracted data does not match submitted data', 400);
+    }
+
+    let verificationNotes = null;
+    if (ocrMismatch) {
+      if (ocrBypass) {
+        console.warn('⚠️ OCR_BYPASS enabled: accepting mismatched OCR for user', req.user.userId);
+      } else if (!isProd) {
+        // Non-prod default: allow submission for admin review so onboarding doesn't get stuck on OCR.
+        // Keep a clear note for the reviewer.
+        verificationNotes = 'OCR mismatch detected; submitted for admin review.';
+      }
     }
 
     // Parse skills
     const skillsArray = typeof skills === 'string'
       ? skills.split(',').map(s => s.trim()).filter(Boolean)
       : Array.isArray(skills) ? skills : [];
+
+    const certificatePaths = (req.files?.certificates || []).map(f => path.basename(f.path));
 
     // Create registration
     const registrationId = uuidv4();
@@ -97,18 +220,20 @@ router.post('/register', authMiddleware, upload.fields([
         id, user_id, first_name, last_name, email, phone,
         id_number, id_number_extracted, id_name_extracted,
         id_photo_path, id_photo_back_path, selfie_path,
+        certificate_paths,
         latitude, longitude, accuracy, altitude,
         location_address, location_area, location_city, location_captured_at,
         skills, experience_years, mpesa_number,
-        verification_status
+        verification_status, verification_notes
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
         $7, $8, $9,
         $10, $11, $12,
-        $13, $14, $15, $16,
-        $17, $18, $19, $20,
-        $21, $22, $23,
-        'pending'
+        $13,
+        $14, $15, $16, $17,
+        $18, $19, $20, $21,
+        $22, $23, $24,
+        'pending', $25
       )
       RETURNING *`,
       [
@@ -118,33 +243,67 @@ router.post('/register', authMiddleware, upload.fields([
         path.basename(req.files.idPhoto[0].path),
         req.files.idPhotoBack?.[0].path ? path.basename(req.files.idPhotoBack[0].path) : null,
         path.basename(req.files.selfie[0].path),
-        parseFloat(latitude), parseFloat(longitude),
+        certificatePaths,
+        lat, lng,
         accuracy ? parseInt(accuracy) : null,
         altitude ? parseFloat(altitude) : null,
         locationAddress, locationArea, locationCity, locationCapturedAt,
         skillsArray, experienceYears ? parseInt(experienceYears) : 0,
-        mpesaNumber || null
+        mpesaNumber || null,
+        verificationNotes
       ]
     );
 
     const registration = result.rows[0];
 
-    // Do NOT update user role here. User becomes a fundi only after admin approval.
+    // Mark the account as a fundi applicant (so the UI doesn't treat them as a customer).
+    // User becomes role='fundi' only after admin approval.
+    try {
+      await query(
+        `UPDATE users
+         SET role = CASE WHEN role = 'customer' THEN 'fundi_pending' ELSE role END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = $1`,
+        [req.user.userId]
+      );
+    } catch (err) {
+      console.error('Failed to set role to fundi_pending:', err.message);
+    }
 
     // Send notification to admin to review this registration
     try {
       const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'emmanuelevian@gmail.com';
-      const subject = 'New fundi verification submitted';
-      const text = `A new fundi registration has been submitted by ${firstName} ${lastName} (email: ${email}, phone: ${phone}). Please review in the admin dashboard.`;
-      const html = `<p>A new fundi registration has been submitted by <strong>${firstName} ${lastName}</strong> (email: ${email}, phone: ${phone}).</p><p><a href="/admin/fundis">Open Admin Pending Fundis</a></p>`;
-      await sendMail(ADMIN_EMAIL, subject, text, html);
+      const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8080';
+      const adminUrl = `${FRONTEND_URL.replace(/\/+$/, '')}/admin/fundis?focus=${encodeURIComponent(registrationId)}`;
+      const docs = {
+        idPhotoUrl: getFileUrl(path.basename(req.files.idPhoto[0].path)),
+        idPhotoBackUrl: req.files.idPhotoBack?.[0]?.path ? getFileUrl(path.basename(req.files.idPhotoBack[0].path)) : null,
+        selfieUrl: getFileUrl(path.basename(req.files.selfie[0].path)),
+      };
+
+      const tpl = adminNewFundiSubmissionEmail({
+        fundi: {
+          firstName,
+          lastName,
+          email,
+          phone,
+          idNumber,
+          skills: skillsArray,
+          notes: verificationNotes,
+        },
+        adminUrl,
+        docs,
+      });
+      await sendMail(ADMIN_EMAIL, tpl.subject, tpl.text, tpl.html);
     } catch (err) {
       console.error('Failed to send fundi submission notification to admin:', err.message);
     }
 
     res.status(201).json({
       success: true,
-      message: 'Registration submitted successfully',
+      message: ocrMismatch && !isProd
+        ? 'Registration submitted for review (OCR mismatch noted)'
+        : 'Registration submitted successfully',
       registration: {
         id: registration.id,
         firstName: registration.first_name,
@@ -152,6 +311,7 @@ router.post('/register', authMiddleware, upload.fields([
         email: registration.email,
         phone: registration.phone,
         verificationStatus: registration.verification_status,
+        certificateCount: certificatePaths.length,
         ocrVerification: {
           idMatches: ocrResult.idValid,
           nameMatches: ocrResult.nameValid,
@@ -223,7 +383,7 @@ router.get('/profile', authMiddleware, async (req, res, next) => {
 /**
  * Fundi dashboard
  */
-router.get('/dashboard', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/dashboard', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -294,7 +454,7 @@ router.get('/dashboard', authMiddleware, requireRole('fundi'), async (req, res, 
 /**
  * Enhanced Fundi Dashboard (with registration steps, subscription, and action items)
  */
-router.get('/dashboard/v2', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/dashboard/v2', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -399,7 +559,7 @@ router.get('/dashboard/v2', authMiddleware, requireRole('fundi'), async (req, re
       }
     }
 
-    if (allStepsComplete && profile.verification_status === 'pending_admin_review') {
+    if (allStepsComplete && profile.verification_status === 'pending') {
       actionItems.push({
         type: 'pending_admin_review',
         priority: 'medium',
@@ -407,7 +567,7 @@ router.get('/dashboard/v2', authMiddleware, requireRole('fundi'), async (req, re
       });
     }
 
-    if (allStepsComplete && profile.verification_status === 'verified' && !subscriptionActive) {
+    if (allStepsComplete && profile.verification_status === 'approved' && !subscriptionActive) {
       actionItems.push({
         type: 'activate_subscription',
         priority: 'high',
@@ -454,10 +614,10 @@ router.get('/dashboard/v2', authMiddleware, requireRole('fundi'), async (req, re
         },
         availability: {
           online,
-          canGoOnline: allStepsComplete && profile.verification_status === 'verified' && subscriptionActive,
+          canGoOnline: allStepsComplete && profile.verification_status === 'approved' && subscriptionActive,
           reasonIfCannot:
             !allStepsComplete ? 'Complete registration first' :
-            profile.verification_status !== 'verified' ? 'Awaiting admin verification' :
+            profile.verification_status !== 'approved' ? 'Awaiting admin verification' :
             !subscriptionActive ? 'Subscribe to go online' : null
         },
         paymentMethod: {
@@ -481,7 +641,7 @@ router.get('/dashboard/v2', authMiddleware, requireRole('fundi'), async (req, re
 /**
  * Get wallet transactions
  */
-router.get('/wallet/transactions', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/wallet/transactions', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
     const page = parseInt(req.query.page) || 1;
@@ -509,7 +669,7 @@ router.get('/wallet/transactions', authMiddleware, requireRole('fundi'), async (
 /**
  * Request withdrawal (M-Pesa ready)
  */
-router.post('/wallet/withdraw-request', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.post('/wallet/withdraw-request', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
     const { amount, mpesaNumber } = req.body;
@@ -564,7 +724,7 @@ router.post('/wallet/withdraw-request', authMiddleware, requireRole('fundi'), as
 /**
  * Get fundi ratings and recent reviews
  */
-router.get('/ratings', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/ratings', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
     const recent = await query(
@@ -636,7 +796,7 @@ router.put('/profile', authMiddleware, async (req, res, next) => {
 /**
  * Set fundi Online (start location tracking) — fundi only
  */
-router.post('/status/online', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.post('/status/online', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const { latitude, longitude, accuracy } = req.body;
     if (typeof latitude === 'undefined' || typeof longitude === 'undefined') {
@@ -645,7 +805,7 @@ router.post('/status/online', authMiddleware, requireRole('fundi'), async (req, 
 
     // CRITICAL: Check fundi is approved before allowing online status
     const fundiCheck = await query(
-      'SELECT verification_status FROM fundi_profiles WHERE user_id = $1',
+      'SELECT verification_status, subscription_active, subscription_expires_at FROM fundi_profiles WHERE user_id = $1',
       [req.user.userId]
     );
 
@@ -653,10 +813,47 @@ router.post('/status/online', authMiddleware, requireRole('fundi'), async (req, 
       throw new AppError('Your account must be approved before going online. Please wait for admin verification.', 403);
     }
 
-    const acc = accuracy ? parseInt(accuracy) : null;
-    // Block submission if GPS accuracy poor (> 150 meters)
-    if (acc !== null && acc > 150) {
-      throw new AppError('GPS accuracy is poor; please move to an open area and retry', 400);
+    // Optional subscription gate (disabled by default for smoother onboarding)
+    const requireSubscription = process.env.REQUIRE_FUNDI_SUBSCRIPTION === 'true';
+    if (requireSubscription) {
+      const now = new Date();
+      const expiresAt = fundiCheck.rows[0].subscription_expires_at ? new Date(fundiCheck.rows[0].subscription_expires_at) : null;
+      const subscriptionActive = fundiCheck.rows[0].subscription_active && (!expiresAt || expiresAt > now);
+      if (!subscriptionActive) {
+        throw new AppError('Active subscription required to go online', 403);
+      }
+    }
+
+    const isProd = process.env.NODE_ENV === 'production';
+    const accParsed =
+      typeof accuracy === 'undefined' || accuracy === null || accuracy === ''
+        ? null
+        : parseInt(accuracy, 10);
+    const acc = Number.isFinite(accParsed) ? accParsed : null;
+
+    // GPS accuracy gate (meters). Higher values are more lenient (helpful indoors / weak GPS).
+    const maxAcc = process.env.FUNDI_ONLINE_MAX_ACCURACY_METERS
+      ? parseInt(process.env.FUNDI_ONLINE_MAX_ACCURACY_METERS, 10)
+      : 300;
+
+    // Dev convenience: allow going online even with poor/missing accuracy (desktop browsers often report huge values).
+    // In production, keep this strict.
+    const allowLowAccInDev =
+      !isProd && (process.env.ALLOW_LOW_ACCURACY_ONLINE ?? 'true') === 'true';
+
+    if (isProd && acc === null) {
+      throw new AppError('Precise GPS accuracy is required. Enable location services and try again.', 400);
+    }
+
+    let lowAccuracyWarning = null;
+    if (acc !== null && acc > maxAcc) {
+      if (isProd || !allowLowAccInDev) {
+        throw new AppError(
+          `GPS accuracy is poor (${acc}m > ${maxAcc}m). Enable precise location or move to an open area and retry.`,
+          400
+        );
+      }
+      lowAccuracyWarning = `Low GPS accuracy (${acc}m > ${maxAcc}m) accepted in dev mode.`;
     }
 
     // Ensure fundi_profiles exists for user
@@ -673,7 +870,16 @@ router.post('/status/online', authMiddleware, requireRole('fundi'), async (req, 
       [req.user.userId, parseFloat(latitude), parseFloat(longitude), acc]
     );
 
-    res.json({ success: true, message: 'Online', location: upsert.rows[0] });
+    res.json({
+      success: true,
+      message: 'Online',
+      location: upsert.rows[0],
+      warning: lowAccuracyWarning,
+      gates: {
+        maxAccuracyMeters: maxAcc,
+        allowLowAccuracyInDev: allowLowAccInDev,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -682,7 +888,7 @@ router.post('/status/online', authMiddleware, requireRole('fundi'), async (req, 
 /**
  * Set fundi Offline (stop tracking)
  */
-router.post('/status/offline', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.post('/status/offline', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     await query(
       `INSERT INTO fundi_locations (user_id, online, updated_at)
@@ -700,16 +906,31 @@ router.post('/status/offline', authMiddleware, requireRole('fundi'), async (req,
 /**
  * Update location while online (fundi only)
  */
-router.post('/location', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.post('/location', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const { latitude, longitude, accuracy } = req.body;
     if (typeof latitude === 'undefined' || typeof longitude === 'undefined') {
       throw new AppError('Latitude and longitude are required', 400);
     }
 
-    const acc = accuracy ? parseInt(accuracy) : null;
-    if (acc !== null && acc > 500) {
-      throw new AppError('GPS accuracy is poor; please recapture', 400);
+    const isProd = process.env.NODE_ENV === 'production';
+    const accParsed =
+      typeof accuracy === 'undefined' || accuracy === null || accuracy === ''
+        ? null
+        : parseInt(accuracy, 10);
+    const acc = Number.isFinite(accParsed) ? accParsed : null;
+
+    const maxAcc = process.env.FUNDI_ONLINE_MAX_ACCURACY_METERS
+      ? parseInt(process.env.FUNDI_ONLINE_MAX_ACCURACY_METERS, 10)
+      : 300;
+
+    const allowLowAccInDev =
+      !isProd && (process.env.ALLOW_LOW_ACCURACY_ONLINE ?? 'true') === 'true';
+
+    if (acc !== null && acc > Math.max(500, maxAcc)) {
+      if (isProd || !allowLowAccInDev) {
+        throw new AppError('GPS accuracy is poor; please recapture', 400);
+      }
     }
 
     const result = await query(
@@ -724,46 +945,13 @@ router.post('/location', authMiddleware, requireRole('fundi'), async (req, res, 
       [req.user.userId, parseFloat(latitude), parseFloat(longitude), acc]
     );
 
+    await query(
+      `INSERT INTO location_history (user_id, job_id, latitude, longitude, accuracy, source, created_at)
+       VALUES ($1, NULL, $2, $3, $4, 'api', NOW())`,
+      [req.user.userId, parseFloat(latitude), parseFloat(longitude), acc]
+    ).catch(() => {});
+
     res.json({ success: true, location: result.rows[0] });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * Get fundi by ID (public, for matching)
- */
-router.get('/:fundiId', async (req, res, next) => {
-  try {
-    const result = await query(
-      `SELECT fp.*, u.email
-       FROM fundi_profiles fp
-       JOIN users u ON u.id = fp.user_id
-       WHERE fp.user_id = $1 AND fp.verification_status = 'approved'`,
-      [req.params.fundiId]
-    );
-
-    if (result.rows.length === 0) {
-      throw new AppError('Fundi not found or not verified', 404);
-    }
-
-    const profile = result.rows[0];
-
-    res.json({
-      success: true,
-      fundi: {
-        id: profile.user_id,
-        firstName: profile.first_name,
-        lastName: profile.last_name,
-        email: profile.email,
-        phone: profile.phone,
-        latitude: profile.latitude,
-        longitude: profile.longitude,
-        skills: profile.skills,
-        experienceYears: profile.experience_years,
-        locationCity: profile.location_city
-      }
-    });
   } catch (error) {
     next(error);
   }
@@ -776,7 +964,7 @@ router.get('/search', async (req, res, next) => {
   try {
     const { latitude, longitude, skill, radius = 50 } = req.query;
 
-    if (!latitude || !longitude) {
+    if (typeof latitude === 'undefined' || typeof longitude === 'undefined') {
       throw new AppError('Latitude and longitude are required', 400);
     }
 
@@ -790,8 +978,12 @@ router.get('/search', async (req, res, next) => {
       FROM fundi_profiles fp
       JOIN users u ON u.id = fp.user_id
       WHERE fp.verification_status = 'approved'
-        AND fp.subscription_active = true
     `;
+
+    const requireSubscription = process.env.REQUIRE_FUNDI_SUBSCRIPTION === 'true';
+    if (requireSubscription) {
+      sqlQuery += ` AND fp.subscription_active = true`;
+    }
 
     const params = [parseFloat(latitude), parseFloat(longitude)];
 
@@ -831,7 +1023,7 @@ router.get('/search', async (req, res, next) => {
 /**
  * Get all fundis (admin only)
  */
-router.get('/all', authMiddleware, async (req, res, next) => {
+router.get('/all', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     const result = await query(
       `SELECT * FROM fundi_profiles ORDER BY created_at DESC`,
@@ -863,12 +1055,12 @@ router.get('/all', authMiddleware, async (req, res, next) => {
 /**
  * Update fundi verification status (admin only)
  */
-router.patch('/:fundiId/verify', authMiddleware, async (req, res, next) => {
+router.patch('/:fundiId/verify', authMiddleware, adminOnly, async (req, res, next) => {
   try {
     const { status, reason } = req.body;
     const { fundiId } = req.params;
 
-    if (!['verified', 'rejected'].includes(status)) {
+    if (!['approved', 'rejected'].includes(status)) {
       throw new AppError('Invalid verification status', 400);
     }
 
@@ -903,58 +1095,9 @@ router.patch('/:fundiId/verify', authMiddleware, async (req, res, next) => {
 });
 
 /**
- * Update fundi live location
- */
-router.post('/location', authMiddleware, async (req, res, next) => {
-  try {
-    const { latitude, longitude, accuracy, online = true } = req.body;
-
-    if (typeof latitude === 'undefined' || typeof longitude === 'undefined') {
-      throw new AppError('Latitude and longitude are required', 400);
-    }
-
-    const lat = parseFloat(latitude);
-    const lng = parseFloat(longitude);
-
-    if (Number.isNaN(lat) || Number.isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-      throw new AppError('Invalid GPS coordinates', 400);
-    }
-
-    // ensure table exists
-    await query(`
-      CREATE TABLE IF NOT EXISTS fundi_locations (
-        user_id UUID PRIMARY KEY,
-        latitude DECIMAL(10,8),
-        longitude DECIMAL(11,8),
-        accuracy INTEGER,
-        online BOOLEAN DEFAULT true,
-        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    // upsert location
-    await query(
-      `INSERT INTO fundi_locations (user_id, latitude, longitude, accuracy, online, updated_at)
-       VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-       ON CONFLICT (user_id) DO UPDATE SET
-         latitude = EXCLUDED.latitude,
-         longitude = EXCLUDED.longitude,
-         accuracy = EXCLUDED.accuracy,
-         online = EXCLUDED.online,
-         updated_at = CURRENT_TIMESTAMP`,
-      [req.user.userId, lat, lng, accuracy ? parseInt(accuracy) : null, online === false ? false : true]
-    );
-
-    res.json({ success: true });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
  * Get fundi status (online/offline, location, subscription, etc)
  */
-router.get('/status', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/status', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -1007,7 +1150,7 @@ router.get('/status', authMiddleware, requireRole('fundi'), async (req, res, nex
 /**
  * Get fundi earnings
  */
-router.get('/earnings', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/earnings', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -1058,7 +1201,7 @@ router.get('/earnings', authMiddleware, requireRole('fundi'), async (req, res, n
 /**
  * Get subscription status
  */
-router.get('/subscription/status', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/subscription/status', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -1093,43 +1236,128 @@ router.get('/subscription/status', authMiddleware, requireRole('fundi'), async (
 /**
  * Activate/extend subscription (placeholder - would integrate with payment system)
  */
-router.post('/subscription/activate', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.post('/subscription/activate', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
-    const { plan = 'monthly' } = req.body;
+    const { plan = 'monthly', mpesaNumber } = req.body;
 
-    // Calculate expiry based on plan
-    const expiryDate = new Date();
-    switch (plan) {
-      case 'monthly':
-        expiryDate.setMonth(expiryDate.getMonth() + 1);
-        break;
-      case 'quarterly':
-        expiryDate.setMonth(expiryDate.getMonth() + 3);
-        break;
-      case 'yearly':
-        expiryDate.setFullYear(expiryDate.getFullYear() + 1);
-        break;
-      default:
-        throw new AppError('Invalid subscription plan', 400);
+    const profileRes = await query('SELECT verification_status, mpesa_number, subscription_expires_at FROM fundi_profiles WHERE user_id = $1', [userId]);
+    if (profileRes.rows.length === 0) throw new AppError('Fundi profile not found', 404);
+    const profile = profileRes.rows[0];
+    if (profile.verification_status !== 'approved') throw new AppError('Your account must be approved before subscribing', 403);
+
+    const pricing = {
+      monthly: { amount: 199, months: 1 },
+      quarterly: { amount: 499, months: 3 },
+      yearly: { amount: 1499, months: 12 },
+    };
+    if (!pricing[plan]) throw new AppError('Invalid subscription plan', 400);
+
+    const isProd = process.env.NODE_ENV === 'production';
+    const allowDevSubBypass = !isProd && (process.env.ALLOW_DEV_SUBSCRIPTION_BYPASS ?? 'true') === 'true';
+
+    // Dev convenience: allow enabling subscription without M-Pesa so QA isn't blocked.
+    if (!mpesaIsConfigured() && allowDevSubBypass) {
+      const { amount, months } = pricing[plan];
+      const now = new Date();
+      const currentExpiry =
+        profile.subscription_expires_at && new Date(profile.subscription_expires_at) > now
+          ? new Date(profile.subscription_expires_at)
+          : now;
+      const newExpiry = new Date(currentExpiry);
+      newExpiry.setMonth(newExpiry.getMonth() + months);
+
+      // Record a completed subscription payment for auditability.
+      const devTxId = `DEV-${Date.now()}`;
+      await query(
+        `INSERT INTO subscription_payments (fundi_id, plan, amount, payment_status, transaction_id)
+         VALUES ($1,$2,$3,'completed',$4)`,
+        [userId, plan, amount, devTxId]
+      ).catch(() => {});
+
+      await query(
+        `UPDATE fundi_profiles
+         SET subscription_active = true,
+             subscription_expires_at = $1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = $2`,
+        [newExpiry, userId]
+      );
+
+      return res.json({
+        success: true,
+        message: 'Subscription activated (dev bypass: no M-Pesa)',
+        warning: 'M-Pesa is not configured; subscription was activated in dev mode for testing.',
+        subscription: {
+          active: true,
+          plan,
+          expiresAt: newExpiry.toISOString(),
+        },
+      });
     }
 
-    // Update subscription
-    const result = await query(
-      `UPDATE fundi_profiles SET subscription_active = true, subscription_expires_at = $1, updated_at = CURRENT_TIMESTAMP
-       WHERE user_id = $2 RETURNING *`,
-      [expiryDate, userId]
-    );
+    if (!mpesaIsConfigured()) {
+      throw new AppError('M-Pesa is not configured on the server. Set MPESA_* env vars.', 503);
+    }
 
-    const fundi = result.rows[0];
+    const normalizeKenyanPhone = (phone) => {
+      if (!phone) return null;
+      const raw = String(phone).trim().replace(/\s+/g, '');
+      const digits = raw.replace(/[^\d+]/g, '');
+      if (digits.startsWith('254') && digits.length >= 12) return digits;
+      if (digits.startsWith('+254') && digits.length >= 13) return digits.slice(1);
+      if (digits.startsWith('07') && digits.length === 10) return `254${digits.slice(1)}`;
+      if (digits.startsWith('01') && digits.length === 10) return `254${digits.slice(1)}`;
+      return digits.replace(/^\+/, '');
+    };
+
+    const phone = normalizeKenyanPhone(mpesaNumber || profile.mpesa_number);
+    if (!phone) throw new AppError('M-Pesa number is required on your profile', 400);
+
+    const { amount } = pricing[plan];
+    const spRes = await query(
+      `INSERT INTO subscription_payments (fundi_id, plan, amount, payment_status)
+       VALUES ($1,$2,$3,'processing')
+       RETURNING *`,
+      [userId, plan, amount]
+    );
+    const sp = spRes.rows[0];
+
+    let mpesaRes;
+    try {
+      mpesaRes = await mpesaStkPush({
+        amount,
+        phoneNumber: phone,
+        accountReference: `SUB-${userId}`,
+        transactionDesc: `FixIt subscription ${plan}`,
+      });
+    } catch (err) {
+      await query(`UPDATE subscription_payments SET payment_status = 'pending' WHERE id = $1`, [sp.id]).catch(() => {});
+      throw new AppError(err.message || 'Failed to initiate subscription payment', 502);
+    }
+
+    const merchantRequestId = mpesaRes.MerchantRequestID || null;
+    const checkoutRequestId = mpesaRes.CheckoutRequestID || null;
+
+    await query(
+      `INSERT INTO mpesa_transactions (payment_id, job_id, kind, fundi_id, subscription_payment_id, plan, phone_number, amount, merchant_request_id, checkout_request_id, status, raw)
+       VALUES (NULL, NULL, 'subscription', $1, $2, $3, $4, $5, $6, $7, 'initiated', $8)`,
+      [userId, sp.id, plan, phone, amount, merchantRequestId, checkoutRequestId, JSON.stringify(mpesaRes)]
+    ).catch(() => {});
+
+    await query(
+      `UPDATE subscription_payments SET transaction_id = $1 WHERE id = $2`,
+      [checkoutRequestId, sp.id]
+    ).catch(() => {});
 
     res.json({
       success: true,
-      message: 'Subscription activated successfully',
-      subscription: {
-        active: true,
-        expiresAt: expiryDate.toISOString(),
-        plan
+      message: 'M-Pesa STK push initiated for subscription',
+      subscriptionPayment: { id: sp.id, plan, amount, status: 'processing', checkoutRequestId },
+      mpesa: {
+        merchantRequestId,
+        checkoutRequestId,
+        customerMessage: mpesaRes.CustomerMessage,
       }
     });
   } catch (error) {
@@ -1140,7 +1368,7 @@ router.post('/subscription/activate', authMiddleware, requireRole('fundi'), asyn
 /**
  * Get fundi subscription status
  */
-router.get('/subscription', authMiddleware, requireRole('fundi'), async (req, res, next) => {
+router.get('/subscription', authMiddleware, requireFundiAccess(), async (req, res, next) => {
   try {
     const userId = req.user.userId;
 
@@ -1170,5 +1398,44 @@ router.get('/subscription', authMiddleware, requireRole('fundi'), async (req, re
   }
 });
 
-export default router;
+/**
+ * Get fundi by ID (public, for matching)
+ * Keep this near the bottom so it doesn't shadow more specific routes.
+ */
+router.get('/:fundiId', async (req, res, next) => {
+  try {
+    const result = await query(
+      `SELECT fp.*, u.email
+       FROM fundi_profiles fp
+       JOIN users u ON u.id = fp.user_id
+       WHERE fp.user_id = $1 AND fp.verification_status = 'approved'`,
+      [req.params.fundiId]
+    );
 
+    if (result.rows.length === 0) {
+      throw new AppError('Fundi not found or not verified', 404);
+    }
+
+    const profile = result.rows[0];
+
+    res.json({
+      success: true,
+      fundi: {
+        id: profile.user_id,
+        firstName: profile.first_name,
+        lastName: profile.last_name,
+        email: profile.email,
+        phone: profile.phone,
+        latitude: profile.latitude,
+        longitude: profile.longitude,
+        skills: profile.skills,
+        experienceYears: profile.experience_years,
+        locationCity: profile.location_city
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;
