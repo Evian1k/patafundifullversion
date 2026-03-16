@@ -412,10 +412,18 @@ NODE_ENV=production npm start
 1. **Set VITE env vars** in your platform:
    - `VITE_API_URL` → production backend URL
    - `VITE_SOCKET_URL` → production Socket.IO server
-2. **Build and deploy**:
+2. **Vercel settings (recommended)**:
+   - Root Directory: `frontend`
+   - Framework Preset: Vite
+   - Build Command: `npm run build`
+   - Output Directory: `dist`
+   - SPA routing: keep `frontend/vercel.json` (rewrites all routes to `index.html`)
+3. **Build and deploy**:
 ```bash
 npm run build
 ```
+
+> Note: Vercel is great for the Vite frontend, but the current backend uses Socket.IO and local `uploads/` storage, which are a better fit for a traditional Node host (Render/Railway/Fly/etc.) plus object storage (S3/GCS) for uploads.
 
 ### Production Checklist
 

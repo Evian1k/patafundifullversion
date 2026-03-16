@@ -30,9 +30,81 @@ const PORT = process.env.PORT || 5000;
 // create HTTP server for socket.io
 const server = http.createServer(app);
 
+const defaultCorsOrigins = [
+  'http://localhost:5173',
+  'http://localhost:8080',
+  'http://localhost:8081',
+  'http://localhost:8082',
+  'http://192.168.0.109:8081',
+];
+
+function getAllowedCorsOriginPatterns() {
+  const patterns = new Set(defaultCorsOrigins);
+
+  const fromEnv = (process.env.CORS_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const pattern of fromEnv) patterns.add(pattern);
+
+  const frontendUrl = (process.env.FRONTEND_URL || '').trim();
+  if (frontendUrl) patterns.add(frontendUrl);
+
+  return [...patterns];
+}
+
+function isAllowedOrigin(origin, patterns) {
+  if (!origin) return true; // non-browser / same-origin requests
+
+  let parsedOrigin;
+  try {
+    parsedOrigin = new URL(origin);
+  } catch {
+    return false;
+  }
+
+  const originHostname = parsedOrigin.hostname;
+  const originProtocol = parsedOrigin.protocol;
+
+  for (const pattern of patterns) {
+    if (!pattern) continue;
+    if (!pattern.includes('*')) {
+      if (pattern.includes('://')) {
+        if (origin === pattern) return true;
+        continue;
+      }
+      if (originHostname === pattern) return true;
+      continue;
+    }
+
+    const m = pattern.match(/^(https?):\/\/(.+)$/);
+    const requiredProtocol = m ? `${m[1]}:` : null;
+    let hostPattern = m ? m[2] : pattern;
+    hostPattern = hostPattern.split('/')[0];
+    hostPattern = hostPattern.split(':')[0];
+
+    if (requiredProtocol && originProtocol !== requiredProtocol) continue;
+
+    if (hostPattern.startsWith('*.')) {
+      const suffix = hostPattern.slice(1); // keep the leading dot
+      if (originHostname.endsWith(suffix)) return true;
+      continue;
+    }
+
+    if (originHostname === hostPattern) return true;
+  }
+
+  return false;
+}
+
+const corsOriginPatterns = getAllowedCorsOriginPatterns();
+const corsOriginFn = (origin, callback) => {
+  callback(null, isAllowedOrigin(origin, corsOriginPatterns));
+};
+
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082', 'http://192.168.0.109:8081'],
+  origin: corsOriginFn,
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
@@ -66,7 +138,7 @@ app.use(errorHandler);
 // Attach socket.io
 const io = new IOServer(server, {
   cors: {
-    origin: ['http://localhost:5173', 'http://localhost:8080', 'http://localhost:8081', 'http://localhost:8082'],
+    origin: corsOriginFn,
     methods: ['GET', 'POST']
   }
 });
