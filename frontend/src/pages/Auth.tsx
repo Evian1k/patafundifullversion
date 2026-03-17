@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import { motion } from "framer-motion";
-import { Wrench, Mail, Lock, User, Eye, EyeOff, ArrowLeft } from "lucide-react";
+import { Mail, Lock, User, Eye, EyeOff, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { InputOTP, InputOTPGroup, InputOTPSlot, InputOTPSeparator } from "@/components/ui/input-otp";
 import { apiClient } from "@/lib/api";
@@ -191,13 +191,8 @@ const Auth = () => {
 
         <div className="bg-card rounded-2xl shadow-xl border border-border/50 p-8">
           {/* Logo */}
-          <Link to="/" className="flex items-center justify-center gap-2 mb-8">
-            <div className="w-12 h-12 rounded-xl bg-gradient-primary flex items-center justify-center shadow-md">
-              <Wrench className="w-6 h-6 text-primary-foreground" />
-            </div>
-            <span className="font-display text-2xl font-bold text-foreground">
-              Fundi<span className="text-primary">Hub</span>
-            </span>
+          <Link to="/" className="flex items-center justify-center mb-8">
+            <img src="/patafundi-logo.svg" alt="PataFundi" className="h-12 w-auto" loading="eager" />
           </Link>
 
           {/* Title */}
