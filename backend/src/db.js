@@ -1,5 +1,6 @@
 import './env.js';
 import pg from 'pg';
+import { SCHEMA } from './db/schema.js';
 
 const { Pool } = pg;
 
@@ -40,6 +41,30 @@ async function ensureDbShape() {
 
 // Fire and forget (logs on failure)
 ensureDbShape().catch(() => {});
+
+async function ensureSchema() {
+  if (process.env.DB_AUTO_SETUP !== 'true') return;
+
+  const client = await pool.connect();
+  try {
+    const { rows } = await client.query(`SELECT to_regclass('public.users') AS users_table`);
+    const exists = rows?.[0]?.users_table;
+    if (exists) return;
+
+    console.log('🗄️  DB_AUTO_SETUP enabled: creating database schema...');
+    const statements = SCHEMA.split(';').filter((stmt) => stmt.trim());
+    for (const statement of statements) {
+      await client.query(statement);
+    }
+    console.log('✅ Database schema created');
+  } finally {
+    client.release();
+  }
+}
+
+// If explicitly enabled, ensure the schema exists before handling requests.
+// This is useful on hosts where one-off jobs/shell access isn't available.
+await ensureSchema();
 
 export const query = (text, params) => pool.query(text, params);
 
