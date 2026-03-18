@@ -5,7 +5,7 @@ import { generateToken, decodeToken } from '../utils/jwt.js';
 import { AppError } from '../utils/errors.js';
 import { query } from '../db.js';
 import { authMiddleware, adminOnly } from '../middlewares/auth.js';
-import { sendMail, isSmtpConfigured, smtpMissingKeys } from '../services/mailer.js';
+import { sendMail, isEmailConfigured, emailMissingKeys } from '../services/mailer.js';
 import { addMinutes } from '../utils/time.js';
 import { generateOtpCode, hashOtp, safeEqual } from '../services/otp.js';
 import { otpEmail } from '../services/emailTemplates.js';
@@ -20,8 +20,11 @@ router.post('/otp-resend', async (req, res, next) => {
   try {
     const { email, purpose = 'register' } = req.body || {};
     if (!email) throw new AppError('Email is required', 400);
-    if (!isSmtpConfigured()) {
-      throw new AppError(`Email delivery is not configured (missing: ${smtpMissingKeys().join(', ')}). Set SMTP_* in backend/.env`, 503);
+    if (!isEmailConfigured()) {
+      throw new AppError(
+        `Email delivery is not configured (missing: ${emailMissingKeys().join(', ')}). Configure EMAIL_TRANSPORT and credentials on your host.`,
+        503
+      );
     }
 
     const userRes = await query('SELECT id, email_verified, role, fundi_otp_verified FROM users WHERE email = $1', [email]);
@@ -115,8 +118,11 @@ router.post('/register', async (req, res, next) => {
       throw new AppError('This email is reserved for the admin account. Use a different email for customer/fundi registration.', 400);
     }
 
-    if (!isSmtpConfigured()) {
-      throw new AppError(`Email delivery is not configured (missing: ${smtpMissingKeys().join(', ')}). Set SMTP_* in backend/.env`, 503);
+    if (!isEmailConfigured()) {
+      throw new AppError(
+        `Email delivery is not configured (missing: ${emailMissingKeys().join(', ')}). Configure EMAIL_TRANSPORT and credentials on your host.`,
+        503
+      );
     }
 
     const requestedRole = (role || 'customer').toString().toLowerCase();

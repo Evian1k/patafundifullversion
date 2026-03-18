@@ -301,6 +301,14 @@ router.get('/fundis/:fundiId', authMiddleware, adminOnly, async (req, res, next)
     }
 
     const fundi = result.rows[0];
+    const evidence = await query(
+      `SELECT evidence_type, confidence_score, passed, score_details, rejection_reason, created_at
+       FROM fundi_verification_evidence
+       WHERE fundi_id = $1
+       ORDER BY created_at DESC
+       LIMIT 50`,
+      [fundi.user_id]
+    );
 
     res.json({
       success: true,
@@ -341,7 +349,8 @@ router.get('/fundis/:fundiId', authMiddleware, adminOnly, async (req, res, next)
           idNumberExtracted: fundi.id_number_extracted,
           fullName: `${fundi.first_name} ${fundi.last_name}`,
           idNameExtracted: fundi.id_name_extracted
-        }
+        },
+        verificationEvidence: evidence.rows || [],
       }
     });
   } catch (error) {

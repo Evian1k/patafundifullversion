@@ -394,6 +394,178 @@ CREATE TABLE IF NOT EXISTS fundi_fraud_logs (
 CREATE INDEX IF NOT EXISTS idx_fundi_fraud_logs_fundi_id ON fundi_fraud_logs(fundi_id);
 CREATE INDEX IF NOT EXISTS idx_fundi_fraud_logs_severity ON fundi_fraud_logs(severity);
 
+-- Policies / legal pages (DB-driven)
+CREATE TABLE IF NOT EXISTS policies (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug VARCHAR(120) NOT NULL UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  version VARCHAR(50) DEFAULT '1.0',
+  status VARCHAR(50) DEFAULT 'published', -- draft, published
+  published_at TIMESTAMP,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_policies_status ON policies(status);
+
+CREATE TABLE IF NOT EXISTS policy_sections (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  policy_id UUID NOT NULL REFERENCES policies(id) ON DELETE CASCADE,
+  title VARCHAR(255) NOT NULL,
+  content TEXT NOT NULL,
+  section_order INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(policy_id, section_order)
+);
+CREATE INDEX IF NOT EXISTS idx_policy_sections_policy ON policy_sections(policy_id, section_order);
+
+-- Track acceptance of policies (for compliance gates)
+CREATE TABLE IF NOT EXISTS policy_acceptances (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  policy_slug VARCHAR(120) NOT NULL,
+  policy_version VARCHAR(50) NOT NULL,
+  accepted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  ip_address VARCHAR(64),
+  user_agent TEXT,
+  UNIQUE(user_id, policy_slug, policy_version)
+);
+CREATE INDEX IF NOT EXISTS idx_policy_acceptances_user ON policy_acceptances(user_id, accepted_at DESC);
+
+-- Rules and enforcement (DB-driven)
+CREATE TABLE IF NOT EXISTS rules (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  role VARCHAR(50) NOT NULL, -- customer, fundi, all
+  rule_text TEXT NOT NULL,
+  severity_level INTEGER NOT NULL CHECK (severity_level >= 1 AND severity_level <= 4),
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_rules_role ON rules(role);
+
+CREATE TABLE IF NOT EXISTS penalties (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  level VARCHAR(50) NOT NULL, -- warning, restriction, suspension, ban
+  description TEXT NOT NULL,
+  duration_minutes INTEGER, -- NULL for permanent
+  action_type VARCHAR(100) NOT NULL, -- warn, restrict, suspend, ban
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_penalties_level ON penalties(level);
+
+CREATE TABLE IF NOT EXISTS violations (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  rule_id UUID REFERENCES rules(id) ON DELETE SET NULL,
+  detected_by VARCHAR(50) DEFAULT 'system', -- system, admin, ai
+  severity INTEGER,
+  metadata JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_violations_user ON violations(user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS enforcement_logs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  action_taken VARCHAR(120) NOT NULL,
+  reason TEXT,
+  metadata JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_enforcement_logs_user ON enforcement_logs(user_id, created_at DESC);
+
+-- Blog / press content
+CREATE TABLE IF NOT EXISTS blog_posts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug VARCHAR(160) NOT NULL UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  excerpt TEXT,
+  content TEXT NOT NULL,
+  cover_image_url VARCHAR(512),
+  status VARCHAR(50) DEFAULT 'published', -- draft, published
+  published_at TIMESTAMP,
+  author_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_blog_posts_status ON blog_posts(status, published_at DESC);
+
+-- Help Center / FAQs
+CREATE TABLE IF NOT EXISTS faq_categories (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug VARCHAR(120) NOT NULL UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  description TEXT,
+  category_order INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS faqs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  category_id UUID NOT NULL REFERENCES faq_categories(id) ON DELETE CASCADE,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  faq_order INTEGER NOT NULL DEFAULT 1,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_faqs_category ON faqs(category_id, faq_order);
+
+-- Support tickets
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  name VARCHAR(255),
+  email VARCHAR(255),
+  subject VARCHAR(255),
+  message TEXT NOT NULL,
+  category VARCHAR(80) DEFAULT 'general',
+  priority VARCHAR(50) DEFAULT 'normal', -- normal, high, urgent
+  status VARCHAR(50) DEFAULT 'open', -- open, in_progress, resolved, closed
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_support_tickets_status ON support_tickets(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS support_ticket_events (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  ticket_id UUID NOT NULL REFERENCES support_tickets(id) ON DELETE CASCADE,
+  actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+  actor_role VARCHAR(50),
+  event_type VARCHAR(80) NOT NULL, -- created, message, status_change, note
+  message TEXT,
+  metadata JSONB,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_support_ticket_events_ticket ON support_ticket_events(ticket_id, created_at DESC);
+
+-- Careers
+CREATE TABLE IF NOT EXISTS career_jobs (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug VARCHAR(160) NOT NULL UNIQUE,
+  title VARCHAR(255) NOT NULL,
+  department VARCHAR(120),
+  location VARCHAR(120),
+  employment_type VARCHAR(80), -- full-time, part-time, contract
+  description TEXT NOT NULL,
+  requirements TEXT,
+  status VARCHAR(50) DEFAULT 'open', -- open, closed
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_career_jobs_status ON career_jobs(status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS career_applications (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  job_id UUID REFERENCES career_jobs(id) ON DELETE SET NULL,
+  full_name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL,
+  phone VARCHAR(40),
+  message TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_career_applications_job ON career_applications(job_id, created_at DESC);
+
 -- Insert default service categories
 INSERT INTO service_categories (name, description, icon) VALUES
   ('Plumbing', 'Pipes, leaks, installations', 'droplets'),

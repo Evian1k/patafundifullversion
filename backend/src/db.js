@@ -4,13 +4,27 @@ import { SCHEMA } from './db/schema.js';
 
 const { Pool } = pg;
 
-const pool = new Pool({
-  host: process.env.DB_HOST || 'localhost',
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME || 'fixit_connect',
-  user: process.env.DB_USER || 'postgres',
-  password: process.env.DB_PASSWORD || 'postgres',
-});
+const DATABASE_URL = (process.env.DATABASE_URL || '').trim();
+const DB_SSL = process.env.DB_SSL === 'true' || process.env.PGSSLMODE === 'require';
+const ssl =
+  DATABASE_URL && DB_SSL
+    ? {
+        rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED === 'true',
+      }
+    : undefined;
+
+const pool = new Pool(
+  DATABASE_URL
+    ? { connectionString: DATABASE_URL, ssl }
+    : {
+        host: process.env.DB_HOST || 'localhost',
+        port: process.env.DB_PORT || 5432,
+        database: process.env.DB_NAME || 'fixit_connect',
+        user: process.env.DB_USER || 'postgres',
+        password: process.env.DB_PASSWORD || 'postgres',
+        ssl,
+      }
+);
 
 pool.on('error', (err) => {
   console.error('Unexpected error on idle client', err);
@@ -27,8 +41,19 @@ async function ensureDbShape() {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Only add missing columns we directly read in auth/fundi flows
+    // 1) Add missing columns we directly read in auth/fundi flows
     await client.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS fundi_otp_verified BOOLEAN DEFAULT false`);
+
+    // 2) If newer tables (e.g. policies) are missing, ensure the full schema.
+    // This is safe in dev because SCHEMA is idempotent (CREATE TABLE IF NOT EXISTS).
+    const shapeCheck = await client.query(`SELECT to_regclass('public.policies') AS policies_table`);
+    const hasPolicies = Boolean(shapeCheck.rows?.[0]?.policies_table);
+    if (!hasPolicies) {
+      const statements = SCHEMA.split(';').filter((stmt) => stmt.trim());
+      for (const statement of statements) {
+        await client.query(statement);
+      }
+    }
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -47,16 +72,12 @@ async function ensureSchema() {
 
   const client = await pool.connect();
   try {
-    const { rows } = await client.query(`SELECT to_regclass('public.users') AS users_table`);
-    const exists = rows?.[0]?.users_table;
-    if (exists) return;
-
-    console.log('🗄️  DB_AUTO_SETUP enabled: creating database schema...');
+    console.log('🗄️  DB_AUTO_SETUP enabled: ensuring database schema...');
     const statements = SCHEMA.split(';').filter((stmt) => stmt.trim());
     for (const statement of statements) {
       await client.query(statement);
     }
-    console.log('✅ Database schema created');
+    console.log('✅ Database schema ensured');
   } finally {
     client.release();
   }

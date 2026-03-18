@@ -510,7 +510,7 @@ const FundiRegister = () => {
   const idPhotoBackInputRef = useRef<HTMLInputElement>(null);
   const selfieFileInputRef = useRef<HTMLInputElement>(null);
 
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(0);
   const [loading, setLoading] = useState(false);
   const [leafletLoaded, setLeafletLoaded] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
@@ -527,6 +527,43 @@ const FundiRegister = () => {
   const [coordsFromDevice, setCoordsFromDevice] = useState(false);
   const [userAdjustedLocation, setUserAdjustedLocation] = useState(false);
   const geocodeSeqRef = useRef(0);
+
+  const [requiredPolicies, setRequiredPolicies] = useState<Array<{ slug: string; title: string; version: string }>>(
+    []
+  );
+  const [policyChecks, setPolicyChecks] = useState<Record<string, boolean>>({});
+  const [penalties, setPenalties] = useState<Array<{ level: string; description: string; duration_minutes: number | null }>>(
+    []
+  );
+  const [rulesPreview, setRulesPreview] = useState<Array<{ role: string; rule_text: string; severity_level: number }>>(
+    []
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [p, pen, rules] = await Promise.all([
+          apiClient.request("/policies/required/fundi", { includeAuth: false }),
+          apiClient.request("/penalties", { includeAuth: false }),
+          apiClient.request("/rules?role=fundi", { includeAuth: false }),
+        ]);
+        if (cancelled) return;
+        const required = p?.required || [];
+        setRequiredPolicies(required);
+        setPenalties(pen?.penalties || []);
+        setRulesPreview((rules?.rules || []).slice(0, 12));
+        const checks: Record<string, boolean> = {};
+        for (const item of required) checks[item.slug] = false;
+        setPolicyChecks(checks);
+      } catch {
+        // If content endpoints are unavailable, allow the UI to load (backend still enforces acceptance on submit).
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Leaflet map refs for Step 4 (mirror CreateJob behavior)
   const fundiMapElRef = useRef<HTMLDivElement | null>(null);
@@ -959,8 +996,6 @@ const FundiRegister = () => {
       }
 
       const issues = blob.size < 50000 ? ["image_too_small_screenshot"] : [];
-      const faceMatch = Math.random() * 0.3 + 0.7;
-      const liveness = Math.random() * 0.2 + 0.8;
 
       setData((prev) => ({
         ...prev,
@@ -968,8 +1003,9 @@ const FundiRegister = () => {
         selfiePhotoPreview: URL.createObjectURL(blob),
         selfieTimestamp: Date.now(),
         isSelfieCapture: true,
-        faceMatchScore: faceMatch,
-        livenessScore: liveness,
+        // Scores are computed server-side during verification (no mock/random).
+        faceMatchScore: 0,
+        livenessScore: 0,
         selfieQualityIssues: issues,
       }));
 
@@ -1413,6 +1449,16 @@ const FundiRegister = () => {
         }
       }
 
+      // Persist policy acceptance now that we have an authenticated session.
+      const slugsToAccept = (requiredPolicies || []).map((p) => p.slug).filter(Boolean);
+      if (slugsToAccept.length > 0) {
+        await apiClient.request("/policies/accept", {
+          method: "POST",
+          includeAuth: true,
+          body: { slugs: slugsToAccept },
+        });
+      }
+
       // Build FormData directly
       const formData = new FormData();
 
@@ -1499,40 +1545,128 @@ const FundiRegister = () => {
           <p className="text-muted-foreground">Complete all steps to start accepting jobs</p>
         </div>
 
-        <div className="mb-8 grid grid-cols-5 gap-2">
-          {verificationSteps.map((vstep, idx) => (
-            <motion.div
-              key={idx}
-              initial={{ opacity: 0, scale: 0.8 }}
-              animate={{ opacity: 1, scale: 1 }}
-              transition={{ delay: idx * 0.1 }}
-              className={`flex flex-col items-center gap-2 p-3 rounded-lg transition-all border-2 ${
-                vstep.status === "approved"
-                  ? "bg-gradient-to-br from-success/20 to-success/10 border-success text-success"
-                  : vstep.status === "rejected"
-                    ? "bg-gradient-to-br from-destructive/20 to-destructive/10 border-destructive text-destructive"
-                    : vstep.status === "in_progress"
-                      ? "bg-gradient-to-br from-primary/20 to-primary/10 border-primary text-primary"
-                      : "bg-gradient-to-br from-muted/50 to-muted/25 border-border text-muted-foreground"
-              }`}
-            >
-              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
-                vstep.status === "approved"
-                  ? "bg-success text-white"
-                  : vstep.status === "rejected"
-                    ? "bg-destructive text-white"
-                    : vstep.status === "in_progress"
-                      ? "bg-primary text-white"
-                      : "bg-muted text-muted-foreground"
-              }`}>
-                {vstep.status === "approved" ? <CheckCircle className="w-4 h-4" /> : idx + 1}
-              </div>
-              <span className="text-xs font-medium text-center line-clamp-2">{vstep.name}</span>
-            </motion.div>
-          ))}
-        </div>
+        {step > 0 ? (
+          <div className="mb-8 grid grid-cols-5 gap-2">
+            {verificationSteps.map((vstep, idx) => (
+              <motion.div
+                key={idx}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                transition={{ delay: idx * 0.1 }}
+                className={`flex flex-col items-center gap-2 p-3 rounded-lg transition-all border-2 ${
+                  vstep.status === "approved"
+                    ? "bg-gradient-to-br from-success/20 to-success/10 border-success text-success"
+                    : vstep.status === "rejected"
+                      ? "bg-gradient-to-br from-destructive/20 to-destructive/10 border-destructive text-destructive"
+                      : vstep.status === "in_progress"
+                        ? "bg-gradient-to-br from-primary/20 to-primary/10 border-primary text-primary"
+                        : "bg-gradient-to-br from-muted/50 to-muted/25 border-border text-muted-foreground"
+                }`}
+              >
+                <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold ${
+                  vstep.status === "approved"
+                    ? "bg-success text-white"
+                    : vstep.status === "rejected"
+                      ? "bg-destructive text-white"
+                      : vstep.status === "in_progress"
+                        ? "bg-primary text-white"
+                        : "bg-muted text-muted-foreground"
+                }`}>
+                  {vstep.status === "approved" ? <CheckCircle className="w-4 h-4" /> : idx + 1}
+                </div>
+                <span className="text-xs font-medium text-center line-clamp-2">{vstep.name}</span>
+              </motion.div>
+            ))}
+          </div>
+        ) : null}
 
         <div className="bg-card border border-border rounded-2xl p-8 space-y-6 shadow-md">
+          {/* STEP 0 (Compliance Gate) */}
+          {step === 0 && (
+            <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-6">
+              <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+                <p className="font-semibold text-foreground">Read before registering</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  PataFundi requires Fundis to follow platform rules, use real identity, and accept platform payments only. Violations lead to penalties.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <h2 className="text-2xl font-bold text-foreground">Policies & Rules</h2>
+                <p className="text-sm text-muted-foreground">
+                  Please review and accept the required policies below.
+                </p>
+                <div className="space-y-2">
+                  {requiredPolicies.length > 0 ? (
+                    requiredPolicies.map((p) => (
+                      <div key={p.slug} className="flex items-start justify-between gap-3 p-3 rounded-lg border bg-secondary/30">
+                        <label className="flex items-start gap-3 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(policyChecks[p.slug])}
+                            onChange={(e) => setPolicyChecks((prev) => ({ ...prev, [p.slug]: e.target.checked }))}
+                            className="mt-1"
+                          />
+                          <span className="text-sm">
+                            <span className="font-semibold text-foreground">{p.title}</span>
+                            <span className="block text-xs text-muted-foreground">Version {p.version}</span>
+                          </span>
+                        </label>
+                        <a
+                          href={`/policies/${p.slug}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-sm text-primary hover:underline"
+                        >
+                          Open
+                        </a>
+                      </div>
+                    ))
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      Loading policies… If this takes too long, continue — the backend will still enforce acceptance on submit.
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <h3 className="text-base font-semibold text-foreground">Penalties (summary)</h3>
+                <div className="grid sm:grid-cols-2 gap-3">
+                  {(penalties || []).slice(0, 4).map((p) => (
+                    <div key={p.level} className="rounded-lg border bg-secondary/20 p-3">
+                      <div className="text-sm font-semibold text-foreground capitalize">{p.level}</div>
+                      <div className="text-xs text-muted-foreground mt-1">{p.description}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <h3 className="text-base font-semibold text-foreground">Top rules for Fundis</h3>
+                <ul className="text-sm text-muted-foreground list-disc pl-5 space-y-1">
+                  {(rulesPreview || []).slice(0, 6).map((r, idx) => (
+                    <li key={idx}>{r.rule_text}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <Button
+                onClick={() => {
+                  const allChecked =
+                    requiredPolicies.length === 0 ? true : requiredPolicies.every((p) => Boolean(policyChecks[p.slug]));
+                  if (!allChecked) {
+                    toast.error("Please accept all required policies to continue");
+                    return;
+                  }
+                  setStep(1);
+                }}
+                className="w-full"
+              >
+                I understand and agree — continue
+              </Button>
+            </motion.div>
+          )}
           {/* STEP 1 */}
           {step === 1 && (
             <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>

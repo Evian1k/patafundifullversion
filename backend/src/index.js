@@ -16,6 +16,15 @@ import uploadRoutes from './routes/upload.js';
 import paymentRoutes from './routes/payments.js';
 import subscriptionRoutes from './routes/subscriptions.js';
 import userRoutes from './routes/users.js';
+import policyRoutes from './routes/policies.js';
+import rulesRoutes from './routes/rules.js';
+import penaltiesRoutes from './routes/penalties.js';
+import blogRoutes from './routes/blog.js';
+import helpRoutes from './routes/help.js';
+import supportRoutes from './routes/support.js';
+import serviceRoutes from './routes/services.js';
+import careersRoutes from './routes/careers.js';
+import adminContentRoutes from './routes/adminContent.js';
 
 // Middleware
 import { errorHandler } from './middlewares/errorHandler.js';
@@ -131,6 +140,15 @@ app.use('/api/payments', paymentRoutes);
 app.use('/api/subscriptions', subscriptionRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/upload', authMiddleware, uploadRoutes);
+app.use('/api/policies', policyRoutes);
+app.use('/api/rules', rulesRoutes);
+app.use('/api/penalties', penaltiesRoutes);
+app.use('/api/blog', blogRoutes);
+app.use('/api/help', helpRoutes);
+app.use('/api/support', supportRoutes);
+app.use('/api/services', serviceRoutes);
+app.use('/api/careers', careersRoutes);
+app.use('/api/admin/content', adminContentRoutes);
 
 // Error handling
 app.use(errorHandler);
@@ -150,6 +168,10 @@ initRealtime(io);
 // Dev convenience: ensure the configured admin account exists after DB clean/reset.
 import { bootstrapAdmin } from './services/adminBootstrap.js';
 bootstrapAdmin().catch((err) => console.error('Admin bootstrap failed:', err.message));
+
+// Seed legal/support content so footer links are never empty (idempotent).
+import { seedDefaultContent } from './services/defaultContentSeed.js';
+seedDefaultContent().catch((err) => console.error('Default content seed failed:', err.message));
 
 server.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);

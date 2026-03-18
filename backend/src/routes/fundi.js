@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { query, getClient } from '../db.js';
 import { upload, getFileUrl } from '../services/file.js';
 import { verifyOCRData } from '../services/ocr.js';
+import { computeImageSimilarityScore, analyzeSelfieQuality } from '../services/aiVerification.js';
 import { AppError } from '../utils/errors.js';
 import { authMiddleware, requireRole, requireFundiAccess, adminOnly } from '../middlewares/auth.js';
 import { sendMail } from '../services/mailer.js';
@@ -117,6 +118,26 @@ router.post('/register', authMiddleware, upload.fields([
   { name: 'certificates', maxCount: 5 }
 ]), async (req, res, next) => {
   try {
+    // Compliance gate: Fundis must accept key policies before submitting verification documents.
+    const requiredPolicySlugs = ['terms-of-service', 'privacy-policy', 'platform-rules', 'enforcement-policy'];
+    const pol = await query(
+      `SELECT slug, version FROM policies WHERE slug = ANY($1::text[])`,
+      [requiredPolicySlugs]
+    );
+    if (pol.rows.length > 0) {
+      const accepted = await query(
+        `SELECT policy_slug, policy_version
+         FROM policy_acceptances
+         WHERE user_id = $1 AND policy_slug = ANY($2::text[])`,
+        [req.user.userId, requiredPolicySlugs]
+      );
+      const acceptedSet = new Set(accepted.rows.map((r) => `${r.policy_slug}@${r.policy_version}`));
+      const missing = pol.rows.filter((p) => !acceptedSet.has(`${p.slug}@${p.version}`)).map((p) => p.slug);
+      if (missing.length) {
+        throw new AppError(`Please review and accept the required policies before registering: ${missing.join(', ')}`, 403);
+      }
+    }
+
     // Debug: log incoming body and file keys to help diagnose multipart issues
     console.log('Fundi register body keys:', Object.keys(req.body || {}));
     console.log('Fundi register files keys:', req.files ? Object.keys(req.files) : []);
@@ -256,6 +277,61 @@ router.post('/register', authMiddleware, upload.fields([
 
     const registration = result.rows[0];
 
+    // AI-like verification signals (deterministic, no mock):
+    // - image similarity (ID vs selfie) using perceptual hashing
+    // - selfie quality checks (brightness + sharpness proxy)
+    let imageSimilarityScore = null;
+    let selfieQuality = null;
+    try {
+      const selfiePath = req.files?.selfie?.[0]?.path;
+      if (selfiePath) {
+        imageSimilarityScore = await computeImageSimilarityScore(idPhotoPath, selfiePath);
+        selfieQuality = await analyzeSelfieQuality(selfiePath);
+
+        await query(
+          `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed)
+           VALUES ($1, 'image_similarity', $2, $3, $4)`,
+          [
+            req.user.userId,
+            imageSimilarityScore,
+            { method: 'ahash', score: imageSimilarityScore },
+            imageSimilarityScore >= 65,
+          ]
+        );
+        await query(
+          `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
+           VALUES ($1, 'selfie_quality', $2, $3, $4, $5)`,
+          [
+            req.user.userId,
+            selfieQuality.sharpnessScore,
+            selfieQuality,
+            selfieQuality.issues.length === 0,
+            selfieQuality.issues.length ? `Issues: ${selfieQuality.issues.join(', ')}` : null,
+          ]
+        );
+      }
+
+      await query(
+        `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
+         VALUES ($1, 'ocr_id', $2, $3, $4, $5)`,
+        [
+          req.user.userId,
+          ocrResult.confidenceScore ?? null,
+          {
+            extractedId: ocrResult.extractedId,
+            extractedName: ocrResult.extractedName,
+            nameValid: ocrResult.nameValid,
+            idValid: ocrResult.idValid,
+            issues: ocrResult.issues || [],
+          },
+          ocrResult.success === true,
+          ocrResult.success === true ? null : (ocrResult.issues || []).join(' | ') || 'OCR mismatch',
+        ]
+      );
+    } catch (e) {
+      console.warn('AI verification signals failed:', e?.message || e);
+    }
+
     // Mark the account as a fundi applicant (so the UI doesn't treat them as a customer).
     // User becomes role='fundi' only after admin approval.
     try {
@@ -318,7 +394,11 @@ router.post('/register', authMiddleware, upload.fields([
           extractedId: ocrResult.extractedId,
           extractedName: ocrResult.extractedName,
           issues: ocrResult.issues
-        }
+        },
+        aiSignals: {
+          imageSimilarityScore,
+          selfieQuality,
+        },
       }
     });
   } catch (error) {

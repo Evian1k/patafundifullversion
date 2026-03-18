@@ -15,6 +15,24 @@ import FundiJob from "./pages/FundiJob";
 import Settings from "./pages/Settings";
 import JobTracking from "./pages/JobTracking";
 import NotFound from "./pages/NotFound";
+import ServicePage from "./pages/ServicePage";
+import About from "./pages/About";
+import Careers from "./pages/Careers";
+import Blog from "./pages/Blog";
+import BlogPost from "./pages/BlogPost";
+import Press from "./pages/Press";
+import HowItWorks from "./pages/HowItWorks";
+import TrustSafety from "./pages/TrustSafety";
+import Investors from "./pages/Investors";
+import Contact from "./pages/Contact";
+import HelpCenter from "./pages/HelpCenter";
+import SafetyGuidelines from "./pages/SafetyGuidelines";
+import ContactSupport from "./pages/ContactSupport";
+import ReportProblem from "./pages/ReportProblem";
+import Socials from "./pages/Socials";
+import PolicyPage from "./pages/PolicyPage";
+import FundiResources from "./pages/FundiResources";
+import FundiApp from "./pages/FundiApp";
 
 // Admin pages
 import AdminLogin from "./pages/admin/AdminLogin";
@@ -72,6 +90,38 @@ const App = () => {
           <Routes>
             <Route path="/" element={<Index />} />
             <Route path="/auth" element={<Auth />} />
+            <Route path="/services/:slug" element={<ServicePage />} />
+
+            {/* Company */}
+            <Route path="/about" element={<About />} />
+            <Route path="/careers" element={<Careers />} />
+            <Route path="/blog" element={<Blog />} />
+            <Route path="/blog/:slug" element={<BlogPost />} />
+            <Route path="/press" element={<Press />} />
+            <Route path="/how-it-works" element={<HowItWorks />} />
+            <Route path="/trust-safety" element={<TrustSafety />} />
+            <Route path="/investors" element={<Investors />} />
+            <Route path="/contact" element={<Contact />} />
+
+            {/* Support */}
+            <Route path="/help" element={<HelpCenter />} />
+            <Route path="/safety" element={<SafetyGuidelines />} />
+            <Route path="/safety-guidelines" element={<SafetyGuidelines />} />
+            <Route path="/contact-support" element={<ContactSupport />} />
+            <Route path="/report-problem" element={<ReportProblem />} />
+
+            {/* Legal / Policies (DB-driven) */}
+            <Route path="/terms" element={<PolicyPage slug="terms-of-service" />} />
+            <Route path="/privacy" element={<PolicyPage slug="privacy-policy" />} />
+            <Route path="/cookies" element={<PolicyPage slug="cookies-policy" />} />
+            <Route path="/refund-policy" element={<PolicyPage slug="refund-policy" />} />
+            <Route path="/platform-rules" element={<PolicyPage slug="platform-rules" />} />
+            <Route path="/enforcement" element={<PolicyPage slug="enforcement-policy" />} />
+            {/* Generic policy route (optional) */}
+            <Route path="/policies/:slug" element={<PolicyPage />} />
+
+            {/* Socials placeholder page (until official accounts are set) */}
+            <Route path="/socials" element={<Socials />} />
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/create-job" element={<CreateJob />} />
             <Route path="/fundi" element={<FundiDashboard />} />
@@ -79,6 +129,8 @@ const App = () => {
             <Route path="/fundi/job/:jobId" element={<FundiJob />} />
             <Route path="/job/:jobId/tracking" element={<JobTracking />} />
             <Route path="/fundi/register" element={<FundiRegister />} />
+            <Route path="/fundi/resources" element={<FundiResources />} />
+            <Route path="/fundi/app" element={<FundiApp />} />
             <Route path="/settings" element={<Settings />} />
 
             {/* Admin Routes */}

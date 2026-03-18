@@ -113,12 +113,12 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
   const handleLogout = async () => {
     try {
       await apiClient.logout();
-      localStorage.removeItem("token");
+      localStorage.removeItem("auth_token");
       toast.success("Logged out successfully");
       navigate("/admin/login");
     } catch (error) {
       console.error("Logout error:", error);
-      localStorage.removeItem("token");
+      localStorage.removeItem("auth_token");
       navigate("/admin/login");
     }
   };
@@ -144,7 +144,7 @@ export default function AdminLayout({ children }: AdminLayoutProps) {
             </div>
             {sidebarOpen && (
               <div>
-                <h1 className="text-white font-bold text-lg">FixIt Admin</h1>
+                <h1 className="text-white font-bold text-lg">PataFundi Admin</h1>
                 <p className="text-xs text-slate-400">Management Panel</p>
               </div>
             )}

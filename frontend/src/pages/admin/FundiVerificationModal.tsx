@@ -137,6 +137,9 @@ export default function FundiVerificationModal({ fundi, onClose }: FundiVerifica
   };
 
   const isOCRMatch = fundi.ocrComparison?.idNumberMatch;
+  const evidence = Array.isArray(fundi.verificationEvidence) ? fundi.verificationEvidence : [];
+  const imageSimilarity = evidence.find((e: any) => e.evidence_type === "image_similarity") || null;
+  const selfieQuality = evidence.find((e: any) => e.evidence_type === "selfie_quality") || null;
 
   return (
     <AnimatePresence>
@@ -227,6 +230,43 @@ export default function FundiVerificationModal({ fundi, onClose }: FundiVerifica
                 </div>
               </div>
             </Card>
+
+            {/* AI Signals (Similarity + Quality) */}
+            {(imageSimilarity || selfieQuality) && (
+              <Card className="p-4 border-2 border-blue-200 bg-blue-50">
+                <div className="flex items-start gap-3">
+                  <FileText className="w-5 h-5 text-blue-700 flex-shrink-0 mt-0.5" />
+                  <div className="flex-1">
+                    <h4 className="font-semibold mb-2">Automated Verification Signals</h4>
+                    {imageSimilarity && (
+                      <p className="text-sm">
+                        <strong>ID vs Selfie Similarity:</strong>{" "}
+                        {typeof imageSimilarity.confidence_score === "number"
+                          ? `${Math.round(imageSimilarity.confidence_score)}%`
+                          : "N/A"}{" "}
+                        {imageSimilarity.passed ? "✓" : "⚠"}
+                      </p>
+                    )}
+                    {selfieQuality && (
+                      <div className="text-sm mt-2">
+                        <p>
+                          <strong>Selfie Quality:</strong>{" "}
+                          {typeof selfieQuality.confidence_score === "number"
+                            ? `${Math.round(selfieQuality.confidence_score)}%`
+                            : "N/A"}{" "}
+                          {selfieQuality.passed ? "✓" : "⚠"}
+                        </p>
+                        {selfieQuality.score_details?.issues?.length ? (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Issues: {selfieQuality.score_details.issues.join(", ")}
+                          </p>
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </Card>
+            )}
 
             {/* Documents */}
             <div>

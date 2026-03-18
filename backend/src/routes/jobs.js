@@ -7,7 +7,7 @@ import { AppError } from '../utils/errors.js';
 import { getClient } from '../db.js';
 import { authMiddleware, requireRole } from '../middlewares/auth.js';
 import { generateOtpCode, hashOtp, safeEqual } from '../services/otp.js';
-import { sendMail, isSmtpConfigured, smtpMissingKeys } from '../services/mailer.js';
+import { sendMail, isEmailConfigured, emailMissingKeys } from '../services/mailer.js';
 
 const router = express.Router();
 
@@ -1205,8 +1205,8 @@ router.post('/:jobId/complete', authMiddleware, upload.array('photos', 5), async
       const custRes = await query('SELECT email FROM users WHERE id = $1', [completedJob.customer_id]);
       const customerEmail = custRes.rows[0]?.email;
       if (customerEmail) {
-        if (!isSmtpConfigured()) {
-          throw new Error(`SMTP not configured (missing: ${smtpMissingKeys().join(', ')})`);
+        if (!isEmailConfigured()) {
+          throw new Error(`Email delivery is not configured (missing: ${emailMissingKeys().join(', ')})`);
         }
         const code = generateOtpCode();
         const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
