@@ -192,7 +192,7 @@ const Auth = () => {
         <div className="bg-card rounded-2xl shadow-xl border border-border/50 p-8">
           {/* Logo */}
           <Link to="/" className="flex items-center justify-center mb-8">
-            <img src="/patafundi-logo.png" alt="PataFundi" className="h-12 w-auto" loading="eager" />
+            <img src="/patafundi-wordmark.png" alt="PataFundi" className="h-14 w-auto" loading="eager" />
           </Link>
 
           {/* Title */}

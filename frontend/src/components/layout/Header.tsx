@@ -25,10 +25,18 @@ const Header = () => {
         <div className="flex items-center justify-between h-16 md:h-20">
           {/* Logo */}
           <Link to="/" className="flex items-center gap-2 group">
+            <div className="h-10 w-10 rounded-xl bg-white shadow-md ring-1 ring-black/5 flex items-center justify-center overflow-hidden">
+              <img
+                src="/patafundi-icon.png"
+                alt="PataFundi"
+                className="h-9 w-9 object-contain"
+                loading="eager"
+              />
+            </div>
             <img
-              src="/patafundi-logo.png"
+              src="/patafundi-wordmark.png"
               alt="PataFundi"
-              className="h-10 w-auto group-hover:opacity-95 transition-opacity"
+              className="hidden sm:block h-8 w-auto group-hover:opacity-95 transition-opacity"
               loading="eager"
             />
           </Link>
