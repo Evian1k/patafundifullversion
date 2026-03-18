@@ -26,7 +26,7 @@ const Header = () => {
           {/* Logo */}
           <Link to="/" className="flex items-center gap-2 group">
             <img
-              src="/patafundi-logo.svg"
+              src="/patafundi-logo.png"
               alt="PataFundi"
               className="h-10 w-auto group-hover:opacity-95 transition-opacity"
               loading="eager"

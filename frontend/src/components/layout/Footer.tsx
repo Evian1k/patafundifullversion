@@ -43,7 +43,7 @@ const Footer = () => {
           {/* Brand */}
           <div className="col-span-2 md:col-span-1">
             <Link to="/" className="flex items-center gap-2 mb-4">
-              <img src="/patafundi-logo.svg" alt="PataFundi" className="h-10 w-auto" loading="lazy" />
+              <img src="/patafundi-logo.png" alt="PataFundi" className="h-10 w-auto" loading="lazy" />
             </Link>
             <p className="text-sm text-background/60 mb-4">
               Connecting you with verified local professionals for all your home and business needs.
