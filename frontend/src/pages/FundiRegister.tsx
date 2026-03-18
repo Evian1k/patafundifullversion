@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
+import Markdown from "@/components/content/Markdown";
 
 interface VerificationStep {
   name: string;
@@ -532,6 +533,11 @@ const FundiRegister = () => {
     []
   );
   const [policyChecks, setPolicyChecks] = useState<Record<string, boolean>>({});
+  const [policyIndex, setPolicyIndex] = useState(0);
+  const [policyLoading, setPolicyLoading] = useState(false);
+  const [policyDetails, setPolicyDetails] = useState<
+    Record<string, { slug: string; title: string; version: string; sections: Array<{ id: string; title: string; content: string }> }>
+  >({});
   const [penalties, setPenalties] = useState<Array<{ level: string; description: string; duration_minutes: number | null }>>(
     []
   );
@@ -556,6 +562,7 @@ const FundiRegister = () => {
         const checks: Record<string, boolean> = {};
         for (const item of required) checks[item.slug] = false;
         setPolicyChecks(checks);
+        setPolicyIndex(0);
       } catch {
         // If content endpoints are unavailable, allow the UI to load (backend still enforces acceptance on submit).
       }
@@ -564,6 +571,46 @@ const FundiRegister = () => {
       cancelled = true;
     };
   }, []);
+
+  const activePolicySlug = requiredPolicies[policyIndex]?.slug || "";
+  const activePolicy = activePolicySlug ? policyDetails[activePolicySlug] : null;
+
+  const ensurePolicyLoaded = useCallback(async (slug: string) => {
+    if (!slug) return;
+    if (policyDetails[slug]) return;
+    setPolicyLoading(true);
+    try {
+      const data = await apiClient.request(`/policies/${slug}`, { includeAuth: false });
+      const p = data?.policy;
+      if (p?.slug) {
+        setPolicyDetails((prev) => ({
+          ...prev,
+          [slug]: {
+            slug: p.slug,
+            title: p.title,
+            version: p.version,
+            sections: Array.isArray(p.sections)
+              ? p.sections.map((s: any) => ({
+                  id: String(s.id),
+                  title: String(s.title),
+                  content: String(s.content || ""),
+                }))
+              : [],
+          },
+        }));
+      }
+    } catch (e) {
+      // keep silent; the UI already allows fallback, backend enforces on submit
+    } finally {
+      setPolicyLoading(false);
+    }
+  }, [policyDetails]);
+
+  useEffect(() => {
+    if (step !== 0) return;
+    if (!activePolicySlug) return;
+    ensurePolicyLoaded(activePolicySlug);
+  }, [step, activePolicySlug, ensurePolicyLoaded]);
 
   // Leaflet map refs for Step 4 (mirror CreateJob behavior)
   const fundiMapElRef = useRef<HTMLDivElement | null>(null);
@@ -1592,42 +1639,103 @@ const FundiRegister = () => {
               </div>
 
               <div className="space-y-3">
-                <h2 className="text-2xl font-bold text-foreground">Policies & Rules</h2>
+                <h2 className="text-2xl font-bold text-foreground">Policies</h2>
                 <p className="text-sm text-muted-foreground">
-                  Please review and accept the required policies below.
+                  Read each policy here, then accept and continue to the next one.
                 </p>
-                <div className="space-y-2">
-                  {requiredPolicies.length > 0 ? (
-                    requiredPolicies.map((p) => (
-                      <div key={p.slug} className="flex items-start justify-between gap-3 p-3 rounded-lg border bg-secondary/30">
-                        <label className="flex items-start gap-3 cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(policyChecks[p.slug])}
-                            onChange={(e) => setPolicyChecks((prev) => ({ ...prev, [p.slug]: e.target.checked }))}
-                            className="mt-1"
-                          />
-                          <span className="text-sm">
-                            <span className="font-semibold text-foreground">{p.title}</span>
-                            <span className="block text-xs text-muted-foreground">Version {p.version}</span>
-                          </span>
-                        </label>
-                        <a
-                          href={`/policies/${p.slug}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-sm text-primary hover:underline"
+
+                {requiredPolicies.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">
+                    Loading required policies…
+                  </p>
+                ) : (
+                  <div className="grid md:grid-cols-3 gap-4">
+                    {/* Policy list */}
+                    <div className="md:col-span-1 space-y-2">
+                      {requiredPolicies.map((p, idx) => (
+                        <button
+                          key={p.slug}
+                          onClick={() => {
+                            setPolicyIndex(idx);
+                            ensurePolicyLoaded(p.slug);
+                          }}
+                          className={`w-full text-left rounded-lg border p-3 transition ${
+                            idx === policyIndex ? "bg-primary/10 border-primary" : "bg-secondary/20 hover:bg-secondary/30"
+                          }`}
                         >
-                          Open
-                        </a>
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-sm font-semibold text-foreground line-clamp-2">{p.title}</div>
+                            {policyChecks[p.slug] ? <CheckCircle className="w-4 h-4 text-success" /> : null}
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1">Version {p.version}</div>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Policy viewer */}
+                    <div className="md:col-span-2 rounded-lg border bg-secondary/10 p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <div className="text-sm font-semibold text-foreground">
+                            {requiredPolicies[policyIndex]?.title}
+                          </div>
+                          <div className="text-xs text-muted-foreground">
+                            Version {requiredPolicies[policyIndex]?.version}
+                          </div>
+                        </div>
+                        <div className="text-xs text-muted-foreground">
+                          {policyLoading ? "Loading…" : null}
+                        </div>
                       </div>
-                    ))
-                  ) : (
-                    <p className="text-sm text-muted-foreground">
-                      Loading policies… If this takes too long, continue — the backend will still enforce acceptance on submit.
-                    </p>
-                  )}
-                </div>
+
+                      <div className="mt-4 max-h-[320px] overflow-auto pr-2">
+                        {activePolicy ? (
+                          <div className="space-y-6">
+                            {activePolicy.sections.map((s) => (
+                              <div key={s.id} className="space-y-2">
+                                <div className="text-sm font-semibold text-foreground">{s.title}</div>
+                                <Markdown content={s.content} />
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            Loading policy content…
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="mt-4 flex flex-col sm:flex-row gap-3">
+                        <Button
+                          variant="outline"
+                          onClick={() => {
+                            const prev = Math.max(0, policyIndex - 1);
+                            setPolicyIndex(prev);
+                            if (requiredPolicies[prev]?.slug) ensurePolicyLoaded(requiredPolicies[prev].slug);
+                          }}
+                          disabled={policyIndex === 0}
+                          className="flex-1"
+                        >
+                          Previous policy
+                        </Button>
+                        <Button
+                          onClick={() => {
+                            const slug = requiredPolicies[policyIndex]?.slug;
+                            if (slug) setPolicyChecks((prev) => ({ ...prev, [slug]: true }));
+                            const next = Math.min(requiredPolicies.length - 1, policyIndex + 1);
+                            if (policyIndex < requiredPolicies.length - 1) {
+                              setPolicyIndex(next);
+                              if (requiredPolicies[next]?.slug) ensurePolicyLoaded(requiredPolicies[next].slug);
+                            }
+                          }}
+                          className="flex-1"
+                        >
+                          Accept & {policyIndex < requiredPolicies.length - 1 ? "next" : "finish"}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-3">
@@ -1653,12 +1761,8 @@ const FundiRegister = () => {
 
               <Button
                 onClick={() => {
-                  const allChecked =
-                    requiredPolicies.length === 0 ? true : requiredPolicies.every((p) => Boolean(policyChecks[p.slug]));
-                  if (!allChecked) {
-                    toast.error("Please accept all required policies to continue");
-                    return;
-                  }
+                  const allChecked = requiredPolicies.length > 0 && requiredPolicies.every((p) => Boolean(policyChecks[p.slug]));
+                  if (!allChecked) return toast.error("Please accept each policy (use “Accept & next”) to continue");
                   setStep(1);
                 }}
                 className="w-full"

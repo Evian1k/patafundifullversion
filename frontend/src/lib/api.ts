@@ -209,13 +209,28 @@ class ApiClient {
   // Fundi endpoints
   async submitFundiRegistration(formData) {
     const url = `${API_URL}/fundi/register`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.token}`,
-      },
-      body: formData,
-    });
+    const controller = new AbortController();
+    // Large uploads can take time; keep this generous but finite so UI doesn't hang forever.
+    const timeoutMs = 90000;
+    const t = setTimeout(() => controller.abort(), timeoutMs);
+    let response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.token}`,
+        },
+        body: formData,
+        signal: controller.signal,
+      });
+    } catch (e) {
+      if (e?.name === 'AbortError') {
+        throw new Error('Registration request timed out. Please try again.');
+      }
+      throw e;
+    } finally {
+      clearTimeout(t);
+    }
 
     if (!response.ok) {
       const error = await response.json().catch(() => ({

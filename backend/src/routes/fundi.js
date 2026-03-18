@@ -188,41 +188,42 @@ router.post('/register', authMiddleware, upload.fields([
       throw new AppError('This phone number is already registered for a fundi', 400);
     }
 
-    // Verify OCR data
-    const idPhotoPath = req.files.idPhoto[0].path;
-    const ocrResult = await verifyOCRData(
-      idPhotoPath,
-      `${firstName} ${lastName}`,
-      idNumber
-    );
-
-    // OCR verification
-    let idNumberExtracted = null;
-    let idNameExtracted = null;
-
-    if (ocrResult.extractedId) idNumberExtracted = ocrResult.extractedId;
-    if (ocrResult.extractedName) idNameExtracted = ocrResult.extractedName;
-
-    // OCR decision
-    const ocrMismatch = !ocrResult.idValid || !ocrResult.nameValid;
     const isProd = process.env.NODE_ENV === 'production';
+    const doAsyncOcr = process.env.OCR_ASYNC === 'true' || (!isProd && process.env.OCR_ASYNC !== 'false');
     const ocrBypass = process.env.OCR_BYPASS === 'true' && !isProd;
     const ocrSoftFail = process.env.OCR_SOFT_FAIL === 'true' && !isProd;
 
-    // In production, OCR mismatch is a hard failure unless the operator explicitly bypasses (not recommended).
-    if (ocrMismatch && isProd && !ocrBypass) {
-      throw new AppError('OCR verification failed: extracted data does not match submitted data', 400);
-    }
+    const idPhotoPath = req.files.idPhoto[0].path;
+    let ocrResult = null;
+    let ocrMismatch = false;
+
+    // OCR fields saved on the profile for admin review/search
+    let idNumberExtracted = null;
+    let idNameExtracted = null;
 
     let verificationNotes = null;
-    if (ocrMismatch) {
-      if (ocrBypass) {
-        console.warn('⚠️ OCR_BYPASS enabled: accepting mismatched OCR for user', req.user.userId);
-      } else if (!isProd) {
-        // Non-prod default: allow submission for admin review so onboarding doesn't get stuck on OCR.
-        // Keep a clear note for the reviewer.
-        verificationNotes = 'OCR mismatch detected; submitted for admin review.';
+
+    if (!doAsyncOcr) {
+      ocrResult = await verifyOCRData(idPhotoPath, `${firstName} ${lastName}`, idNumber);
+      if (ocrResult?.extractedId) idNumberExtracted = ocrResult.extractedId;
+      if (ocrResult?.extractedName) idNameExtracted = ocrResult.extractedName;
+
+      ocrMismatch = !ocrResult.idValid || !ocrResult.nameValid;
+
+      // In production, OCR mismatch is a hard failure unless the operator explicitly bypasses (not recommended).
+      if (ocrMismatch && isProd && !ocrBypass) {
+        throw new AppError('OCR verification failed: extracted data does not match submitted data', 400);
       }
+
+      if (ocrMismatch) {
+        if (ocrBypass) {
+          console.warn('⚠️ OCR_BYPASS enabled: accepting mismatched OCR for user', req.user.userId);
+        } else if (!isProd) {
+          verificationNotes = 'OCR mismatch detected; submitted for admin review.';
+        }
+      }
+    } else {
+      verificationNotes = 'OCR pending; submitted for admin review.';
     }
 
     // Parse skills
@@ -277,61 +278,6 @@ router.post('/register', authMiddleware, upload.fields([
 
     const registration = result.rows[0];
 
-    // AI-like verification signals (deterministic, no mock):
-    // - image similarity (ID vs selfie) using perceptual hashing
-    // - selfie quality checks (brightness + sharpness proxy)
-    let imageSimilarityScore = null;
-    let selfieQuality = null;
-    try {
-      const selfiePath = req.files?.selfie?.[0]?.path;
-      if (selfiePath) {
-        imageSimilarityScore = await computeImageSimilarityScore(idPhotoPath, selfiePath);
-        selfieQuality = await analyzeSelfieQuality(selfiePath);
-
-        await query(
-          `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed)
-           VALUES ($1, 'image_similarity', $2, $3, $4)`,
-          [
-            req.user.userId,
-            imageSimilarityScore,
-            { method: 'ahash', score: imageSimilarityScore },
-            imageSimilarityScore >= 65,
-          ]
-        );
-        await query(
-          `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
-           VALUES ($1, 'selfie_quality', $2, $3, $4, $5)`,
-          [
-            req.user.userId,
-            selfieQuality.sharpnessScore,
-            selfieQuality,
-            selfieQuality.issues.length === 0,
-            selfieQuality.issues.length ? `Issues: ${selfieQuality.issues.join(', ')}` : null,
-          ]
-        );
-      }
-
-      await query(
-        `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
-         VALUES ($1, 'ocr_id', $2, $3, $4, $5)`,
-        [
-          req.user.userId,
-          ocrResult.confidenceScore ?? null,
-          {
-            extractedId: ocrResult.extractedId,
-            extractedName: ocrResult.extractedName,
-            nameValid: ocrResult.nameValid,
-            idValid: ocrResult.idValid,
-            issues: ocrResult.issues || [],
-          },
-          ocrResult.success === true,
-          ocrResult.success === true ? null : (ocrResult.issues || []).join(' | ') || 'OCR mismatch',
-        ]
-      );
-    } catch (e) {
-      console.warn('AI verification signals failed:', e?.message || e);
-    }
-
     // Mark the account as a fundi applicant (so the UI doesn't treat them as a customer).
     // User becomes role='fundi' only after admin approval.
     try {
@@ -346,40 +292,13 @@ router.post('/register', authMiddleware, upload.fields([
       console.error('Failed to set role to fundi_pending:', err.message);
     }
 
-    // Send notification to admin to review this registration
-    try {
-      const ADMIN_EMAIL = process.env.ADMIN_EMAIL || 'emmanuelevian@gmail.com';
-      const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:8080';
-      const adminUrl = `${FRONTEND_URL.replace(/\/+$/, '')}/admin/fundis?focus=${encodeURIComponent(registrationId)}`;
-      const docs = {
-        idPhotoUrl: getFileUrl(path.basename(req.files.idPhoto[0].path)),
-        idPhotoBackUrl: req.files.idPhotoBack?.[0]?.path ? getFileUrl(path.basename(req.files.idPhotoBack[0].path)) : null,
-        selfieUrl: getFileUrl(path.basename(req.files.selfie[0].path)),
-      };
-
-      const tpl = adminNewFundiSubmissionEmail({
-        fundi: {
-          firstName,
-          lastName,
-          email,
-          phone,
-          idNumber,
-          skills: skillsArray,
-          notes: verificationNotes,
-        },
-        adminUrl,
-        docs,
-      });
-      await sendMail(ADMIN_EMAIL, tpl.subject, tpl.text, tpl.html);
-    } catch (err) {
-      console.error('Failed to send fundi submission notification to admin:', err.message);
-    }
-
     res.status(201).json({
       success: true,
-      message: ocrMismatch && !isProd
-        ? 'Registration submitted for review (OCR mismatch noted)'
-        : 'Registration submitted successfully',
+      message: doAsyncOcr
+        ? 'Registration submitted successfully (verification checks running)'
+        : (ocrMismatch && !isProd
+            ? 'Registration submitted for review (OCR mismatch noted)'
+            : 'Registration submitted successfully'),
       registration: {
         id: registration.id,
         firstName: registration.first_name,
@@ -388,17 +307,104 @@ router.post('/register', authMiddleware, upload.fields([
         phone: registration.phone,
         verificationStatus: registration.verification_status,
         certificateCount: certificatePaths.length,
-        ocrVerification: {
-          idMatches: ocrResult.idValid,
-          nameMatches: ocrResult.nameValid,
-          extractedId: ocrResult.extractedId,
-          extractedName: ocrResult.extractedName,
-          issues: ocrResult.issues
-        },
-        aiSignals: {
-          imageSimilarityScore,
-          selfieQuality,
-        },
+        ocrVerification: doAsyncOcr
+          ? { pending: true }
+          : {
+              idMatches: ocrResult?.idValid,
+              nameMatches: ocrResult?.nameValid,
+              extractedId: ocrResult?.extractedId,
+              extractedName: ocrResult?.extractedName,
+              issues: ocrResult?.issues,
+            },
+      }
+    });
+
+    // Background verification + admin notification (do not block user submission).
+    const userId = req.user.userId;
+    const selfiePath = req.files?.selfie?.[0]?.path || null;
+    const idPhotoBackPath = req.files.idPhotoBack?.[0]?.path || null;
+    const adminEmail = process.env.ADMIN_EMAIL || 'emmanuelevian@gmail.com';
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:8080';
+    const adminUrl = `${frontendUrl.replace(/\/+$/, '')}/admin/fundis?focus=${encodeURIComponent(registrationId)}`;
+    const docs = {
+      idPhotoUrl: getFileUrl(path.basename(req.files.idPhoto[0].path)),
+      idPhotoBackUrl: idPhotoBackPath ? getFileUrl(path.basename(idPhotoBackPath)) : null,
+      selfieUrl: getFileUrl(path.basename(req.files.selfie[0].path)),
+    };
+    const fundiMeta = { firstName, lastName, email, phone, idNumber, skills: skillsArray, notes: verificationNotes };
+
+    setImmediate(async () => {
+      // 1) OCR (if async)
+      try {
+        const finalOcr = doAsyncOcr
+          ? await verifyOCRData(idPhotoPath, `${firstName} ${lastName}`, idNumber)
+          : ocrResult;
+
+        if (finalOcr) {
+          await query(
+            `UPDATE fundi_profiles
+             SET id_number_extracted = COALESCE($2, id_number_extracted),
+                 id_name_extracted = COALESCE($3, id_name_extracted),
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
+            [registrationId, finalOcr.extractedId || null, finalOcr.extractedName || null]
+          );
+
+          await query(
+            `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
+             VALUES ($1, 'ocr_id', $2, $3, $4, $5)`,
+            [
+              userId,
+              finalOcr.confidenceScore ?? null,
+              {
+                extractedId: finalOcr.extractedId,
+                extractedName: finalOcr.extractedName,
+                nameValid: finalOcr.nameValid,
+                idValid: finalOcr.idValid,
+                issues: finalOcr.issues || [],
+              },
+              finalOcr.success === true,
+              finalOcr.success === true ? null : (finalOcr.issues || []).join(' | ') || 'OCR mismatch',
+            ]
+          );
+        }
+      } catch (e) {
+        console.warn('Async OCR failed:', e?.message || e);
+      }
+
+      // 2) Image similarity + selfie quality
+      try {
+        if (selfiePath) {
+          const imageSimilarityScore = await computeImageSimilarityScore(idPhotoPath, selfiePath);
+          const selfieQuality = await analyzeSelfieQuality(selfiePath);
+
+          await query(
+            `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed)
+             VALUES ($1, 'image_similarity', $2, $3, $4)`,
+            [userId, imageSimilarityScore, { method: 'ahash', score: imageSimilarityScore }, imageSimilarityScore >= 65]
+          );
+          await query(
+            `INSERT INTO fundi_verification_evidence (fundi_id, evidence_type, confidence_score, score_details, passed, rejection_reason)
+             VALUES ($1, 'selfie_quality', $2, $3, $4, $5)`,
+            [
+              userId,
+              selfieQuality.sharpnessScore,
+              selfieQuality,
+              selfieQuality.issues.length === 0,
+              selfieQuality.issues.length ? `Issues: ${selfieQuality.issues.join(', ')}` : null,
+            ]
+          );
+        }
+      } catch (e) {
+        console.warn('Async AI signals failed:', e?.message || e);
+      }
+
+      // 3) Admin email (fire-and-forget)
+      try {
+        const tpl = adminNewFundiSubmissionEmail({ fundi: fundiMeta, adminUrl, docs });
+        sendMail(adminEmail, tpl.subject, tpl.text, tpl.html).catch(() => {});
+      } catch (e) {
+        console.warn('Async admin email failed:', e?.message || e);
       }
     });
   } catch (error) {

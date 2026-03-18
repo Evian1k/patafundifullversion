@@ -109,12 +109,25 @@ const effectiveTransport = EMAIL_TRANSPORT === 'auto' ? (isSmtpEnvConfigured() ?
 
 if (effectiveTransport === 'smtp' && isSmtpEnvConfigured()) {
   const shouldRequireTls = !SMTP_SECURE && SMTP_PORT === 587;
+  const connectionTimeout = process.env.SMTP_CONNECTION_TIMEOUT
+    ? parseInt(process.env.SMTP_CONNECTION_TIMEOUT, 10)
+    : 8000;
+  const greetingTimeout = process.env.SMTP_GREETING_TIMEOUT
+    ? parseInt(process.env.SMTP_GREETING_TIMEOUT, 10)
+    : 8000;
+  const socketTimeout = process.env.SMTP_SOCKET_TIMEOUT
+    ? parseInt(process.env.SMTP_SOCKET_TIMEOUT, 10)
+    : 15000;
+
   transporter = nodemailer.createTransport({
     host: SMTP_HOST,
     port: SMTP_PORT,
     secure: SMTP_SECURE,
     // Port 587 should upgrade via STARTTLS; this avoids some provider quirks.
     requireTLS: shouldRequireTls,
+    connectionTimeout,
+    greetingTimeout,
+    socketTimeout,
     logger: SMTP_DEBUG,
     debug: SMTP_DEBUG,
     auth: {
