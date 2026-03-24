@@ -24,6 +24,7 @@ import helpRoutes from './routes/help.js';
 import supportRoutes from './routes/support.js';
 import serviceRoutes from './routes/services.js';
 import careersRoutes from './routes/careers.js';
+import mapsRoutes from './routes/maps.js';
 import adminContentRoutes from './routes/adminContent.js';
 
 // Middleware
@@ -148,6 +149,7 @@ app.use('/api/help', helpRoutes);
 app.use('/api/support', supportRoutes);
 app.use('/api/services', serviceRoutes);
 app.use('/api/careers', careersRoutes);
+app.use('/api/maps', mapsRoutes);
 app.use('/api/admin/content', adminContentRoutes);
 
 // Error handling
