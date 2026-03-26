@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 import {
   Search,
   Mail,
@@ -36,6 +37,7 @@ interface PaginationInfo {
 }
 
 export default function CustomerManagement() {
+  const navigate = useNavigate();
   const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
@@ -117,8 +119,27 @@ export default function CustomerManagement() {
       });
       toast.success("Customer blocked successfully");
       fetchCustomers(pagination.page);
-    } catch (error: any) {
-      toast.error(error.message || "Failed to block customer");
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "";
+      toast.error(msg || "Failed to block customer");
+    } finally {
+      setActionLoading(null);
+      setOpenMenu(null);
+    }
+  };
+
+  const handleUnblockCustomer = async (customerId: string) => {
+    setActionLoading(customerId);
+    try {
+      await apiClient.request(`/admin/customers/${customerId}/unblock`, {
+        method: "POST",
+        includeAuth: true,
+      });
+      toast.success("Customer unblocked successfully");
+      fetchCustomers(pagination.page);
+    } catch (error: unknown) {
+      const msg = error instanceof Error ? error.message : "";
+      toast.error(msg || "Failed to unblock customer");
     } finally {
       setActionLoading(null);
       setOpenMenu(null);
@@ -265,9 +286,11 @@ export default function CustomerManagement() {
                               className="absolute right-0 mt-2 w-40 bg-white rounded-lg shadow-lg border border-gray-200 z-50"
                             >
                               <button
-                                onClick={() =>
-                                  handleBlockCustomer(customer.id)
-                                }
+                                onClick={() => {
+                                  const blocked = customer.status === "blocked" || customer.status === "disabled";
+                                  if (blocked) handleUnblockCustomer(customer.id);
+                                  else handleBlockCustomer(customer.id);
+                                }}
                                 disabled={
                                   actionLoading === customer.id
                                 }
@@ -276,12 +299,14 @@ export default function CustomerManagement() {
                                 {actionLoading === customer.id ? (
                                   <>
                                     <Loader2 className="w-4 h-4 animate-spin" />
-                                    Blocking...
+                                    Updating...
                                   </>
                                 ) : (
                                   <>
                                     <Ban className="w-4 h-4" />
-                                    Block Customer
+                                    {customer.status === "blocked" || customer.status === "disabled"
+                                      ? "Unblock Customer"
+                                      : "Block Customer"}
                                   </>
                                 )}
                               </button>

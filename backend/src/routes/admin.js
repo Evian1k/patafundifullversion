@@ -883,6 +883,68 @@ router.get('/customers', authMiddleware, adminOnly, async (req, res, next) => {
 });
 
 /**
+ * Block a customer account (admin only)
+ * Used by the admin UI in CustomerManagement.
+ */
+router.post('/customers/:customerId/block', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const customerId = req.params.customerId;
+
+    const before = await query('SELECT status FROM users WHERE id = $1', [customerId]);
+    if (before.rows.length === 0) throw new AppError('Customer not found', 404);
+
+    await query(
+      'UPDATE users SET status = $1, disabled_at = CURRENT_TIMESTAMP WHERE id = $2',
+      ['blocked', customerId]
+    );
+
+    await logAdminAction(
+      req.user.userId,
+      'block_customer',
+      'user',
+      customerId,
+      { status: before.rows[0].status || null },
+      { status: 'blocked' },
+      req.body?.reason || 'Admin blocked customer',
+      req.ip
+    );
+
+    res.json({ success: true, message: 'Customer blocked successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * Unblock a customer account (admin only)
+ */
+router.post('/customers/:customerId/unblock', authMiddleware, adminOnly, async (req, res, next) => {
+  try {
+    const customerId = req.params.customerId;
+
+    const before = await query('SELECT status FROM users WHERE id = $1', [customerId]);
+    if (before.rows.length === 0) throw new AppError('Customer not found', 404);
+
+    await query('UPDATE users SET status = $1, disabled_at = NULL WHERE id = $2', ['active', customerId]);
+
+    await logAdminAction(
+      req.user.userId,
+      'unblock_customer',
+      'user',
+      customerId,
+      { status: before.rows[0].status || null },
+      { status: 'active' },
+      req.body?.reason || 'Admin unblocked customer',
+      req.ip
+    );
+
+    res.json({ success: true, message: 'Customer unblocked successfully' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * Get all jobs with filtering (admin read-only)
  */
 router.get('/jobs', authMiddleware, adminOnly, async (req, res, next) => {
